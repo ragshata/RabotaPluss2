@@ -3224,6 +3224,490 @@ async def start_order(message: Message, state: FSMContext):
     await state.set_state("order_city")
 
 
+
+# пагинация городов
+@router.callback_query(StateFilter("order_city"), F.data.startswith("order:city_page:"))
+async def city_page(call: CallbackQuery):
+    page = int(call.data.split(":")[2])
+    await call.message.edit_reply_markup(reply_markup=cities_swipe(page))
+    await call.answer()
+
+
+# выбор города
+@router.callback_query(StateFilter("order_city"), F.data.startswith("order:city:"))
+async def city_choose(call: CallbackQuery, state: FSMContext):
+    city = call.data.split(":")[2]
+    await state.update_data(city=city)
+    await call.message.edit_text(
+        f"🏙 Город: <b>{city}</b>\n\n📍 Введите адрес объекта (улица, дом, кв/офис):",
+        reply_markup=cancel_order_button(),
+    )
+    await state.set_state("order_address")
+    await call.answer()
+
+
+# ────────────────────────── Адрес ──────────────────────────
+
+
+@router.message(StateFilter("order_address"))
+async def get_address(message: Message, state: FSMContext):
+    address = clear_html(message.text or "").strip()
+    if not address or len(address) < 5:
+        await message.answer(
+            "❌ Слишком короткий адрес. Введите адрес подробнее:",
+            reply_markup=cancel_order_button(),
+        )
+        return
+    await state.update_data(address=address)
+
+    # категории — мультивыбор
+    await message.answer(
+        "🧰 Выберите категории работ (можно несколько), затем нажмите «Готово».",
+        reply_markup=categories_multiselect_kb(selected_ids=set(), page=0),
+    )
+    await state.set_state("order_categories")
+
+
+# пагинация категорий
+@router.callback_query(
+    StateFilter("order_categories"), F.data.startswith("order:cat_page:")
+)
+async def cats_page(call: CallbackQuery, state: FSMContext):
+    page = int(call.data.split(":")[2])
+    data = await state.get_data()
+    selected = set(data.get("cats", []))
+    await call.message.edit_reply_markup(
+        reply_markup=categories_multiselect_kb(selected, page)
+    )
+    await call.answer()
+
+
+# переключение категории
+@router.callback_query(
+    StateFilter("order_categories"), F.data.startswith("order:cat_toggle:")
+)
+async def cats_toggle(call: CallbackQuery, state: FSMContext):
+    _, _, cat_id_str, page_str = call.data.split(":")
+    cat_id = int(cat_id_str)
+    page = int(page_str)
+    data = await state.get_data()
+    selected = set(data.get("cats", []))
+    if cat_id in selected:
+        selected.remove(cat_id)
+    else:
+        selected.add(cat_id)
+    await state.update_data(cats=list(selected))
+    await call.message.edit_reply_markup(
+        reply_markup=categories_multiselect_kb(selected, page)
+    )
+    await call.answer()
+
+
+# завершили выбор категорий
+@router.callback_query(StateFilter("order_categories"), F.data == "order:cat_done")
+async def cats_done(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = list(data.get("cats", []))
+    if not selected:
+        await call.answer("Выберите хотя бы одну категорию.", show_alert=True)
+        return
+    await call.message.edit_text(
+        "📝 Опишите задачу (что нужно сделать):", reply_markup=cancel_order_button()
+    )
+    await state.set_state("order_desc")
+    await call.answer()
+
+
+# ────────────────────────── Описание ──────────────────────────
+
+
+@router.message(StateFilter("order_desc"))
+async def get_desc(message: Message, state: FSMContext):
+    desc = clear_html(message.text or "").strip()
+    if not desc or len(desc) < 10:
+        await message.answer(
+            "❌ Слишком короткое описание. Добавьте деталей:",
+            reply_markup=cancel_order_button(),
+        )
+        return
+    await state.update_data(desc=desc)
+    await message.answer(
+        "💰 Укажите бюджет в рублях (число).\nИли нажмите «Пропустить» — будет «договорная».",
+        reply_markup=skip_button("order:budget_skip"),
+    )
+    await state.set_state("order_budget")
+
+
+# пропуск бюджета
+@router.callback_query(StateFilter("order_budget"), F.data == "order:budget_skip")
+async def budget_skip(call: CallbackQuery, state: FSMContext):
+    await state.update_data(budget="договорная")
+    await call.message.edit_text(
+        "📅 Укажите сроки выполнения.\nФормат: <code>дд.мм.гггг — дд.мм.гггг</code>\nИли напишите: <code>пока не определился</code>",
+        reply_markup=cancel_order_button(),
+    )
+    await state.set_state("order_dates")
+    await call.answer()
+
+
+# бюджет числом
+@router.message(StateFilter("order_budget"))
+async def get_budget(message: Message, state: FSMContext):
+    txt = (message.text or "").replace(" ", "")
+    if not txt.isdigit():
+        await message.answer(
+            "❌ Введите число (без пробелов), либо нажмите «Пропустить».",
+            reply_markup=skip_button("order:budget_skip"),
+        )
+        return
+    val = int(txt)
+    if not (0 <= val <= 10_000_000):
+        await message.answer(
+            "❌ Бюджет должен быть от 0 до 10 000 000.",
+            reply_markup=skip_button("order:budget_skip"),
+        )
+        return
+    await state.update_data(budget=val)
+    await message.answer(
+        "📅 Укажите сроки выполнения.\nФормат: <code>дд.мм.гггг — дд.мм.гггг</code>\nИли напишите: <code>пока не определился</code>",
+        reply_markup=cancel_order_button(),
+    )
+    await state.set_state("order_dates")
+
+
+# ────────────────────────── Сроки ──────────────────────────
+
+
+@router.message(StateFilter("order_dates"))
+async def get_dates(message: Message, state: FSMContext):
+    raw = (message.text or "").strip().lower()
+    if raw in ("пока не определился", "не определился", "не знаю"):
+        await state.update_data(dates="пока не определился")
+    else:
+        parts = [p.strip() for p in raw.replace("—", "-").split("-")]
+        if len(parts) != 2:
+            await message.answer(
+                "❌ Формат неверный. Пример: 10.08.2025 - 20.08.2025\nИли напишите: пока не определился",
+                reply_markup=cancel_order_button(),
+            )
+            return
+        d1 = _parse_date(parts[0])
+        d2 = _parse_date(parts[1])
+        if not d1 or not d2 or d2 < d1:
+            await message.answer(
+                "❌ Даты неверные или окончание раньше начала.",
+                reply_markup=cancel_order_button(),
+            )
+            return
+        await state.update_data(
+            dates=f"{d1.strftime('%d.%m.%Y')} – {d2.strftime('%d.%m.%Y')}"
+        )
+
+    await message.answer(
+        "📸 Пришлите до 5 фото (по желанию), или нажмите «Пропустить».",
+        reply_markup=skip_button("order:photos_skip"),
+    )
+    await state.set_state("order_photos")
+
+
+# ────────────────────────── Фото (опционально) ──────────────────────────
+
+
+# ---------- Клавиатура для шага с фото ----------
+def photos_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Готово", callback_data="order:photos_done")],
+            [
+                InlineKeyboardButton(
+                    text="⏭ Пропустить", callback_data="order:photos_skip"
+                )
+            ],
+        ]
+    )
+
+
+# Если у тебя уже есть skip_button/cancel_order_button — можешь оставить их.
+# Тут отдельная клавиатура именно для шага с фото.
+
+
+# ---------- Вспомогательно: переход на следующий шаг ----------
+async def proceed_to_next_step(state: FSMContext, message_or_cb):
+    await state.set_state("order_comment")
+    text = "✍️ Добавьте комментарий к заказу (по желанию) или напишите «нет»."
+    if isinstance(message_or_cb, Message):
+        await message_or_cb.answer(text)
+    else:
+        await message_or_cb.message.answer(text)
+
+
+# ────────────────────────── Фото (до 5 шт) ──────────────────────────
+
+
+@router.message(StateFilter("order_photos"), F.photo, flags={"rate": 0})
+async def add_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    photos = list(data.get("photos", []))
+
+    # Берём самое большое превью (последний элемент)
+    file_id = message.photo[-1].file_id
+
+    if file_id in photos:
+        await message.answer(
+            f"⚠️ Это фото уже добавлено. Сейчас сохранено: {len(photos)}/5.",
+            reply_markup=photos_kb(),
+        )
+        return
+
+    if len(photos) >= 5:
+        await message.answer(
+            "⚠️ Лимит 5 фото уже достигнут. Нажмите «Готово» или «Пропустить».",
+            reply_markup=photos_kb(),
+        )
+        return
+
+    photos.append(file_id)
+    await state.update_data(photos=photos)
+
+    if len(photos) < 5:
+        await message.answer(
+            f"✅ Фото сохранено ({len(photos)}/5). "
+            f"Можете отправить ещё или нажмите «Готово».",
+            reply_markup=photos_kb(),
+        )
+    else:
+        await message.answer(
+            "✅ Добавлено 5/5 фото. Нажмите «Готово» для перехода дальше.",
+            reply_markup=photos_kb(),
+        )
+
+
+@router.message(StateFilter("order_photos"))
+async def non_photo_in_photos_step(message: Message, state: FSMContext):
+    # Разрешаем текст «пропустить» в любом регистре
+    txt = (message.text or "").strip().lower()
+    if txt in {"пропустить", "skip"}:
+        # Если фото уже есть — не теряем их, идём как «Готово»
+        data = await state.get_data()
+        if data.get("photos"):
+            await message.answer("➡️ Переходим дальше с уже добавленными фото.")
+            await proceed_to_next_step(state, message)
+        else:
+            await message.answer("➡️ Пропускаем фото и идём дальше.")
+            await state.update_data(photos=[])
+            await proceed_to_next_step(state, message)
+        return
+
+    await message.answer(
+        "🖼 Пришлите фото (до 5 шт). "
+        "После загрузки нажмите «Готово» или «Пропустить».",
+        reply_markup=photos_kb(),
+    )
+
+
+@router.callback_query(
+    StateFilter("order_photos"), F.data == "order:photos_done", flags={"rate": 0}
+)
+async def photos_done(cq: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get("photos", [])
+
+    if not photos:
+        # Ничего не добавили, предложим либо прислать, либо пропустить
+        await cq.message.answer(
+            "Пока нет фото. Пришлите хотя бы одно или нажмите «Пропустить».",
+            reply_markup=photos_kb(),
+        )
+        await cq.answer()
+        return
+
+    await cq.message.answer(f"✅ Фото сохранены ({len(photos)}/5). Переходим дальше.")
+    await cq.answer()
+    await proceed_to_next_step(state, cq)
+
+
+@router.callback_query(
+    StateFilter("order_photos"), F.data == "order:photos_skip", flags={"rate": 0}
+)
+async def photos_skip(cq: CallbackQuery, state: FSMContext):
+    # ВАЖНО: если фото уже есть — не удаляем их, идём дальше как «Готово»
+    data = await state.get_data()
+    if data.get("photos"):
+        await cq.message.answer("➡️ Переходим дальше с уже добавленными фото.")
+    else:
+        await state.update_data(photos=[])
+        await cq.message.answer("➡️ Пропускаем фото и идём дальше.")
+    await cq.answer()
+    await proceed_to_next_step(state, cq)
+
+
+# ────────────────────────── Клавиатура подтверждения ──────────────────────────
+def confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить", callback_data="order:confirm"
+                )
+            ],
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data="order:edit")],
+        ]
+    )
+
+
+# ────────────────────────── Комментарий → Подтверждение ──────────────────────────
+@router.message(StateFilter("order_comment"))
+async def get_comment(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    comment = (
+        "" if raw.lower() in {"нет", "не", "без комментария", "-", "—"} else raw[:1000]
+    )
+    await state.update_data(comment=comment)
+
+    # показать подтверждение
+    await _show_confirmation(message, state)
+    await state.set_state("order_confirm")
+
+
+# ────────────────────────── Подтверждение ──────────────────────────
+async def _show_confirmation(msg: Message, state: FSMContext):
+    data = await state.get_data()
+
+    # Безопасные значения + экранирование для HTML
+    city = html.escape(str(data.get("city", "—")))
+    address = html.escape(str(data.get("address", "—")))
+    desc = html.escape(str(data.get("desc", "—")))
+    budget = data.get("budget", "договорная")
+    dates = html.escape(str(data.get("dates", "пока не определился")))
+    photos = list(data.get("photos", []))
+    cats_ids = list(data.get("cats", []))
+    comment = html.escape(str(data.get("comment", "")))
+
+    # Формат бюджета: число с пробелами
+    if isinstance(budget, int):
+        budget_text = f"{budget:,}".replace(",", " ") + " руб."
+    else:
+        budget_text = html.escape(str(budget))
+
+    # Категории
+    cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
+    cats_titles = [cats_map.get(cid, str(cid)) for cid in cats_ids]
+    cats_text = html.escape(", ".join(cats_titles)) if cats_titles else "—"
+
+    # Если есть фото — отправим как media group (без подписи),
+    # а затем отдельным сообщением — текст с кнопками.
+    if photos:
+        media = [InputMediaPhoto(type="photo", media=file_id) for file_id in photos[:5]]
+        await msg.answer_media_group(media=media)
+
+    # Текст подтверждения
+    txt = (
+        f"<b>Проверьте заказ:</b>\n\n"
+        f"🏙 Город: <code>{city}</code>\n"
+        f"📍 Адрес: <code>{address}</code>\n"
+        f"🧰 Категории: <code>{cats_text}</code>\n\n"
+        f"📝 Описание:\n{desc}\n\n"
+        f"💰 Бюджет: <code>{budget_text}</code>\n"
+        f"📅 Сроки: <code>{dates}</code>\n"
+        f"🖼 Фото: <code>{len(photos)} шт.</code>\n"
+        f"💬 Комментарий: {comment if comment else '—'}"
+    )
+    await msg.answer(txt, reply_markup=confirm_kb())
+
+
+# ────────────────────────── Обработка «Подтвердить / Изменить» ──────────────────────────
+
+
+@router.callback_query(StateFilter("order_confirm"), F.data == "order:edit")
+async def edit_order(cq: CallbackQuery, state: FSMContext):
+    # Верни пользователя на нужный шаг (например, к описанию или категориям)
+    # Пример: вернуться в описание
+    await state.set_state("order_desc")
+    await cq.message.answer("✏️ Измените описание заказа и отправьте новое сообщение.")
+    await cq.answer()
+
+
+@router.callback_query(StateFilter("order_confirm"), F.data == "order:confirm_edit")
+async def confirm_edit(call: CallbackQuery, state: FSMContext):
+    await call.message.answer(
+        "Введите новое ОПИСАНИЕ задачи:", reply_markup=cancel_order_button()
+    )
+    await state.set_state("order_desc")
+    await call.answer()
+
+
+@router.callback_query(StateFilter("order_confirm"), F.data == "order:confirm")
+async def confirm_ok(call: CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    city = data["city"]
+    address = data["address"]
+    desc = data["desc"]
+    budget = data.get("budget", "договорная")
+    dates = data.get("dates", "пока не определился")
+    photos = data.get("photos", [])
+    cats_ids = data.get("cats", [])
+
+    main_cat_id = cats_ids[0] if cats_ids else 0
+    position_name = (desc[:50] + "…") if len(desc) > 53 else desc
+
+    ext = {
+        "city": city,
+        "address": address,
+        "categories": cats_ids,
+        "budget": budget,
+        "dates": dates,
+        "photos": photos,
+        "raw_desc": desc,
+    }
+    position_desc = "[ORDER]\n" + json.dumps(ext, ensure_ascii=False, indent=2)
+    price_val = budget if isinstance(budget, int) else 0
+
+    Positionx.add(
+        main_cat_id,  # category_id
+        call.from_user.id,  # position_id → автоинкремент
+        position_name,
+        price_val,
+        position_desc,
+        0,  # time legacy
+        0,  # worker_id (используем для владельца)
+        0,  # st atus
+    )
+
+    await state.clear()
+
+    cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
+    cats_titles = [cats_map.get(cid, str(cid)) for cid in cats_ids]
+    cats_text = ", ".join(cats_titles) if cats_titles else "—"
+    budget_text = f"{budget} руб." if isinstance(budget, int) else str(budget)
+
+    await call.message.answer(
+        ded(
+            f"""
+        ✅ <b>Ваш заказ создан!</b>
+        Категория: [{cats_text}]
+        Описание: [{desc}]
+        Адрес: [{address}]
+        Бюджет: [{budget_text}]
+        Сроки: [{dates}]
+    """
+        )
+    )
+    await call.answer()
+
+
+# ────────────────────────── Отмена из любого шага ──────────────────────────
+
+
+@router.callback_query(F.data == "order:cancel")
+async def order_cancel(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("<b>Создание заказа отменено.</b>")
+    await call.message.answer(
+        "Главное меню:", reply_markup=menu_second_start_clients(call.from_user.id)
+    )
+    await call.answer()
+
+
 ################################################################################
 ############################### СОЗДАНИЕ ЗАКАЗОВ #############################
 # Принятие названия категории для её создания
