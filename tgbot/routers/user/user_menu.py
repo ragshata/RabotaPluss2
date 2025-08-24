@@ -1,5 +1,6 @@
 # - *- coding: utf- 8 - *-
 import asyncio
+import html
 import sqlite3
 from typing import Union
 
@@ -481,66 +482,218 @@ async def get_dates(message: Message, state: FSMContext):
 # ────────────────────────── Фото (опционально) ──────────────────────────
 
 
-@router.callback_query(StateFilter("order_photos"), F.data == "order:photos_skip")
-async def photos_skip(call: CallbackQuery, state: FSMContext):
-    await state.update_data(photos=[])
-    await _show_confirmation(call.message, state)
-    await state.set_state("order_confirm")
-    await call.answer()
+# ---------- Клавиатура для шага с фото ----------
+def photos_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Готово", callback_data="order:photos_done")],
+            [
+                InlineKeyboardButton(
+                    text="⏭ Пропустить", callback_data="order:photos_skip"
+                )
+            ],
+        ]
+    )
 
 
-@router.message(StateFilter("order_photos"), F.photo)
-async def photos_collect(message: Message, state: FSMContext):
+# Если у тебя уже есть skip_button/cancel_order_button — можешь оставить их.
+# Тут отдельная клавиатура именно для шага с фото.
+
+
+# ---------- Вспомогательно: переход на следующий шаг ----------
+async def proceed_to_next_step(state: FSMContext, message_or_cb):
+    await state.set_state("order_comment")
+    text = "✍️ Добавьте комментарий к заказу (по желанию) или напишите «нет»."
+    if isinstance(message_or_cb, Message):
+        await message_or_cb.answer(text)
+    else:
+        await message_or_cb.message.answer(text)
+
+
+# ────────────────────────── Фото (до 5 шт) ──────────────────────────
+
+
+@router.message(StateFilter("order_photos"), F.photo, flags={"rate": 0})
+async def add_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     photos = list(data.get("photos", []))
-    if len(photos) >= 5:
+
+    # Берём самое большое превью (последний элемент)
+    file_id = message.photo[-1].file_id
+
+    if file_id in photos:
         await message.answer(
-            "Максимум 5 фото. Нажмите «Пропустить» для продолжения.",
-            reply_markup=skip_button("order:photos_skip"),
+            f"⚠️ Это фото уже добавлено. Сейчас сохранено: {len(photos)}/5.",
+            reply_markup=photos_kb(),
         )
         return
-    photos.append(message.photo[-1].file_id)
+
+    if len(photos) >= 5:
+        await message.answer(
+            "⚠️ Лимит 5 фото уже достигнут. Нажмите «Готово» или «Пропустить».",
+            reply_markup=photos_kb(),
+        )
+        return
+
+    photos.append(file_id)
     await state.update_data(photos=photos)
+
+    if len(photos) < 5:
+        await message.answer(
+            f"✅ Фото сохранено ({len(photos)}/5). "
+            f"Можете отправить ещё или нажмите «Готово».",
+            reply_markup=photos_kb(),
+        )
+    else:
+        await message.answer(
+            "✅ Добавлено 5/5 фото. Нажмите «Готово» для перехода дальше.",
+            reply_markup=photos_kb(),
+        )
+
+
+@router.message(StateFilter("order_photos"))
+async def non_photo_in_photos_step(message: Message, state: FSMContext):
+    # Разрешаем текст «пропустить» в любом регистре
+    txt = (message.text or "").strip().lower()
+    if txt in {"пропустить", "skip"}:
+        # Если фото уже есть — не теряем их, идём как «Готово»
+        data = await state.get_data()
+        if data.get("photos"):
+            await message.answer("➡️ Переходим дальше с уже добавленными фото.")
+            await proceed_to_next_step(state, message)
+        else:
+            await message.answer("➡️ Пропускаем фото и идём дальше.")
+            await state.update_data(photos=[])
+            await proceed_to_next_step(state, message)
+        return
+
     await message.answer(
-        f"Фото добавлено ({len(photos)}/5). Можете отправить ещё или нажмите «Пропустить».",
-        reply_markup=skip_button("order:photos_skip"),
+        "🖼 Пришлите фото (до 5 шт). "
+        "После загрузки нажмите «Готово» или «Пропустить».",
+        reply_markup=photos_kb(),
     )
+
+
+@router.callback_query(
+    StateFilter("order_photos"), F.data == "order:photos_done", flags={"rate": 0}
+)
+async def photos_done(cq: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get("photos", [])
+
+    if not photos:
+        # Ничего не добавили, предложим либо прислать, либо пропустить
+        await cq.message.answer(
+            "Пока нет фото. Пришлите хотя бы одно или нажмите «Пропустить».",
+            reply_markup=photos_kb(),
+        )
+        await cq.answer()
+        return
+
+    await cq.message.answer(f"✅ Фото сохранены ({len(photos)}/5). Переходим дальше.")
+    await cq.answer()
+    await proceed_to_next_step(state, cq)
+
+
+@router.callback_query(
+    StateFilter("order_photos"), F.data == "order:photos_skip", flags={"rate": 0}
+)
+async def photos_skip(cq: CallbackQuery, state: FSMContext):
+    # ВАЖНО: если фото уже есть — не удаляем их, идём дальше как «Готово»
+    data = await state.get_data()
+    if data.get("photos"):
+        await cq.message.answer("➡️ Переходим дальше с уже добавленными фото.")
+    else:
+        await state.update_data(photos=[])
+        await cq.message.answer("➡️ Пропускаем фото и идём дальше.")
+    await cq.answer()
+    await proceed_to_next_step(state, cq)
+
+
+# ────────────────────────── Клавиатура подтверждения ──────────────────────────
+def confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить", callback_data="order:confirm"
+                )
+            ],
+            [InlineKeyboardButton(text="✏️ Изменить", callback_data="order:edit")],
+        ]
+    )
+
+
+# ────────────────────────── Комментарий → Подтверждение ──────────────────────────
+@router.message(StateFilter("order_comment"))
+async def get_comment(message: Message, state: FSMContext):
+    raw = (message.text or "").strip()
+    comment = (
+        "" if raw.lower() in {"нет", "не", "без комментария", "-", "—"} else raw[:1000]
+    )
+    await state.update_data(comment=comment)
+
+    # показать подтверждение
+    await _show_confirmation(message, state)
+    await state.set_state("order_confirm")
 
 
 # ────────────────────────── Подтверждение ──────────────────────────
-
-
 async def _show_confirmation(msg: Message, state: FSMContext):
     data = await state.get_data()
-    city = data["city"]
-    address = data["address"]
-    desc = data["desc"]
-    budget = data.get("budget", "договорная")
-    dates = data.get("dates", "пока не определился")
-    photos = data.get("photos", [])
-    cats_ids = data.get("cats", [])
 
+    # Безопасные значения + экранирование для HTML
+    city = html.escape(str(data.get("city", "—")))
+    address = html.escape(str(data.get("address", "—")))
+    desc = html.escape(str(data.get("desc", "—")))
+    budget = data.get("budget", "договорная")
+    dates = html.escape(str(data.get("dates", "пока не определился")))
+    photos = list(data.get("photos", []))
+    cats_ids = list(data.get("cats", []))
+    comment = html.escape(str(data.get("comment", "")))
+
+    # Формат бюджета: число с пробелами
+    if isinstance(budget, int):
+        budget_text = f"{budget:,}".replace(",", " ") + " руб."
+    else:
+        budget_text = html.escape(str(budget))
+
+    # Категории
     cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
     cats_titles = [cats_map.get(cid, str(cid)) for cid in cats_ids]
-    cats_text = ", ".join(cats_titles) if cats_titles else "—"
+    cats_text = html.escape(", ".join(cats_titles)) if cats_titles else "—"
 
-    txt = ded(
-        f"""
-        <b>Проверьте заказ:</b>
+    # Если есть фото — отправим как media group (без подписи),
+    # а затем отдельным сообщением — текст с кнопками.
+    if photos:
+        media = [InputMediaPhoto(type="photo", media=file_id) for file_id in photos[:5]]
+        await msg.answer_media_group(media=media)
 
-        🏙 Город: <code>{city}</code>
-        📍 Адрес: <code>{address}</code>
-        🧰 Категории: <code>{cats_text}</code>
-
-        📝 Описание:
-        {desc}
-
-        💰 Бюджет: <code>{budget if isinstance(budget, str) else f"{budget} руб."}</code>
-        📅 Сроки: <code>{dates}</code>
-        🖼 Фото: <code>{len(photos)} шт.</code>
-    """
+    # Текст подтверждения
+    txt = (
+        f"<b>Проверьте заказ:</b>\n\n"
+        f"🏙 Город: <code>{city}</code>\n"
+        f"📍 Адрес: <code>{address}</code>\n"
+        f"🧰 Категории: <code>{cats_text}</code>\n\n"
+        f"📝 Описание:\n{desc}\n\n"
+        f"💰 Бюджет: <code>{budget_text}</code>\n"
+        f"📅 Сроки: <code>{dates}</code>\n"
+        f"🖼 Фото: <code>{len(photos)} шт.</code>\n"
+        f"💬 Комментарий: {comment if comment else '—'}"
     )
     await msg.answer(txt, reply_markup=confirm_kb())
+
+
+# ────────────────────────── Обработка «Подтвердить / Изменить» ──────────────────────────
+
+
+@router.callback_query(StateFilter("order_confirm"), F.data == "order:edit")
+async def edit_order(cq: CallbackQuery, state: FSMContext):
+    # Верни пользователя на нужный шаг (например, к описанию или категориям)
+    # Пример: вернуться в описание
+    await state.set_state("order_desc")
+    await cq.message.answer("✏️ Измените описание заказа и отправьте новое сообщение.")
+    await cq.answer()
 
 
 @router.callback_query(StateFilter("order_confirm"), F.data == "order:confirm_edit")
@@ -552,7 +705,7 @@ async def confirm_edit(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.callback_query(StateFilter("order_confirm"), F.data == "order:confirm_ok")
+@router.callback_query(StateFilter("order_confirm"), F.data == "order:confirm")
 async def confirm_ok(call: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
     city = data["city"]
@@ -579,14 +732,14 @@ async def confirm_ok(call: CallbackQuery, state: FSMContext, bot: Bot):
     price_val = budget if isinstance(budget, int) else 0
 
     Positionx.add(
-        main_cat_id,
-        call.from_user.id,  # position_id = client_id
+        main_cat_id,  # category_id
+        call.from_user.id,  # position_id → автоинкремент
         position_name,
         price_val,
         position_desc,
         0,  # time legacy
-        0,  # worker_id
-        0,  # status
+        0,  # worker_id (используем для владельца)
+        0,  # st atus
     )
 
     await state.clear()
@@ -737,6 +890,7 @@ async def prod_removes(message: Message, bot: Bot, state: FSM, arSession: ARS):
         reply_markup=users_admire(),
     )
 
+
 @router.message(F.text == "📚 База знаний")
 async def prod_removes(message: Message, bot: Bot, state: FSM, arSession: ARS):
     await state.clear()
@@ -745,6 +899,7 @@ async def prod_removes(message: Message, bot: Bot, state: FSM, arSession: ARS):
         "<b> База знаний</b>\n",
         reply_markup=baza_znanii(),
     )
+
 
 @router.message(F.text == "👤 Политика конфиденциальности")
 async def prod_removes(message: Message, bot: Bot, state: FSM, arSession: ARS):
@@ -895,83 +1050,55 @@ def _pos_to_dict(pos) -> dict:
 
 def _collect_my_responses(worker_id: int) -> dict:
     """
-    Возвращает:
-      {
-        "current": [position_unix, ...],   # ожидание/назначен/в работе
-        "done":    [position_unix, ...],   # выполнен (status=2 у позиции и выбран этот worker)
-        "map":     { str(punix): <dict по позиции> }
-      }
-    Логика:
-    - Если есть Responsesx: берём все отклики исполнителя.
-      * status=2 (отклонён) — пропускаем.
-      * Если позиция выполнена (position_status=2) и выбран этот worker — во вкладку done.
-      * Остальное — во вкладку current (ожидает подтверждения / назначен / в работе).
-    - Плюс подмешиваем позиции, где worker уже выбран, даже если нет записи в Responsesx (на всякий).
-    - Если Responsesx нет — остаётся прежняя логика: только назначенные позиции.
+    Показываем ТОЛЬКО заказы, где этот пользователь назначен исполнителем:
+      - current: все, где position_status != 2
+      - done:    где position_status == 2
+    Ключ элемента — position_unix (если >0), иначе position_id.
     """
+    DONE_STATUSES = {2}  # при необходимости подстрой
+
     current: list[int] = []
     done: list[int] = []
     mp: dict[str, dict] = {}
 
-    if HAS_RESPONSES_TABLE:
-        seen: set[int] = set()
-        # 1) Отклики исполнителя
-        for r in Responsesx.gets(worker_id=worker_id) or []:
-            punix = int(getattr(r, "position_unix", 0) or 0)
-            if not punix or punix in seen:
-                continue
-            seen.add(punix)
+    positions = Positionx.gets(worker_id=worker_id) or []
 
-            pos = Positionx.get(position_unix=punix)
-            if not pos:
-                continue
+    def to_int(x, default=0):
+        try:
+            return int(x)
+        except Exception:
+            return default
 
-            d = _pos_to_dict(pos)
-            mp[str(punix)] = d
+    for pos in positions:
+        d = _pos_to_dict(pos)
 
-            r_status = int(
-                getattr(r, "status", 0) or 0
-            )  # 0=ожидание,1=одобрен,2=отклонён
-            if r_status == 2:
-                # отклонённые в эти вкладки не показываем
-                continue
+        punix = to_int(d.get("position_unix", 0))
+        pid = to_int(d.get("position_id", 0))
+        key = punix if punix > 0 else pid
+        if key == 0:
+            continue  # пропускаем совсем кривые записи
 
-            pos_status = int(d.get("position_status", 0) or 0)
-            assigned = int(d.get("worker_id", 0) or 0) == worker_id
+        # записываем в map
+        if str(key) not in mp:
+            # можно добавить служебные пометки, не ломая существующую логику
+            d.setdefault("_key_is_punix", punix > 0)
+            d.setdefault("_key_val", key)
+            mp[str(key)] = d
 
-            if pos_status == 2 and assigned:
-                done.append(punix)
-            else:
-                current.append(punix)
+        status = to_int(d.get("position_status", 0))
+        if status in DONE_STATUSES:
+            done.append(key)
+        else:
+            current.append(key)
 
-        # 2) Подмешаем назначенные позиции (на случай отсутствия записи в Responsesx)
-        for pos in Positionx.gets(worker_id=worker_id) or []:
-            punix = int(getattr(pos, "position_unix", 0) or 0)
-            if not punix:
-                continue
+    # дедуп и сортировка: новые выше (по punix, иначе по id)
+    def sort_key(k: int) -> int:
+        dd = mp.get(str(k), {})
+        pu = to_int(dd.get("position_unix", 0))
+        return pu if pu > 0 else to_int(dd.get("position_id", 0))
 
-            if str(punix) not in mp:
-                mp[str(punix)] = _pos_to_dict(pos)
-
-            # если такой punix уже классифицировали на шаге (1), не дублируем
-            if punix in current or punix in done:
-                continue
-
-            if int(getattr(pos, "position_status", 0) or 0) == 2:
-                done.append(punix)
-            else:
-                current.append(punix)
-    else:
-        # Fallback: без Responsesx видно только назначенные позиции
-        for pos in Positionx.gets(worker_id=worker_id) or []:
-            d = _pos_to_dict(pos)
-            punix = int(d["position_unix"])
-            mp[str(punix)] = d
-            (done if int(d["position_status"] or 0) == 2 else current).append(punix)
-
-    # Дедуп и сортировка: новые (больший punix) выше
-    current = sorted(set(current), reverse=True)
-    done = sorted(set(done), reverse=True)
+    current = sorted(set(current), key=sort_key, reverse=True)
+    done = sorted(set(done), key=sort_key, reverse=True)
 
     return {"current": current, "done": done, "map": mp}
 
@@ -1068,13 +1195,6 @@ async def _show_myresp(
         await message.answer(txt, reply_markup=kb)
 
     await state.update_data(myresp_tab=tab, myresp_page=page, myresp_per=per_page)
-
-
-@router.message(F.text == "📋 Мои отклики")
-async def my_responses_root(message: Message, state: FSMContext):
-    await state.clear()
-    await _show_myresp(message, state, message.from_user.id, tab="current", page=0)
-    await state.set_state("myresp_list")
 
 
 @router.callback_query(StateFilter("myresp_list"), F.data.startswith("myresp:tab:"))
@@ -1383,6 +1503,24 @@ def _respond_back_kb(pid: int, punix: int) -> InlineKeyboardMarkup:
     )
 
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
+def _orders_category_kb_with_back(allowed_cat_ids, page_idx=0) -> InlineKeyboardMarkup:
+    kb = _orders_category_swipe(
+        allowed_cat_ids, page_idx
+    )  # твоя существующая клавиатура
+    # добавим низом кнопку «Назад»
+    kb.inline_keyboard.append(
+        [
+            InlineKeyboardButton(
+                text="← Режимы просмотра", callback_data="orders:back_modes"
+            )
+        ]
+    )
+    return kb
+
+
 def _orders_list_inline(
     cat_id: int,
     items_unix: list[int],
@@ -1437,27 +1575,331 @@ def _orders_list_inline(
 # ────────────────────────── Открытие: «Актуальные заказы» ──────────────────────────
 
 
+from aiogram import Router, F
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+from aiogram.fsm.context import FSMContext
+import html
+from textwrap import shorten
+
+router = Router()
+
+# =============== Клавиатуры ===============
+
+
+def _orders_mode_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📄 Все заказы", callback_data="orders:mode_all"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🗂 По категориям", callback_data="orders:mode_cats"
+                )
+            ],
+        ]
+    )
+
+
+def _orders_all_kb(
+    keys, order_map, page: int, per_page: int, total: int
+) -> InlineKeyboardMarkup:
+    rows = []
+
+    # Кнопки заказов (по одной в строке)
+    for k in keys:
+        d = order_map[str(k)]
+        name = d.get("position_name") or d.get("name") or "Без названия"
+        name = html.unescape(str(name))
+        name = shorten(name, width=36, placeholder="…")
+        price = d.get("position_price", 0)
+        price_txt = (
+            f"{price:,}".replace(",", " ") + " ₽"
+            if isinstance(price, int) and price > 0
+            else "договорная"
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{name} · {price_txt}", callback_data=f"orders:open:{k}"
+                )
+            ]
+        )
+
+    # Пагинация
+    last_page = max((total - 1) // per_page, 0)
+    nav = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(text="« Назад", callback_data=f"orders:all:p:{page-1}")
+        )
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page+1}/{last_page+1}", callback_data="orders:noop"
+        )
+    )
+    if page < last_page:
+        nav.append(
+            InlineKeyboardButton(
+                text="Вперёд »", callback_data=f"orders:all:p:{page+1}"
+            )
+        )
+    if nav:
+        rows.append(nav)
+
+    # Кнопка «← Режимы»
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="← Режимы просмотра", callback_data="orders:back_modes"
+            )
+        ]
+    )
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# =============== Хелперы ===============
+
+
+def _to_int(x, default=0):
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def _order_key(d: dict) -> int:
+    """Ключ заказа: position_unix если >0, иначе position_id."""
+    pu = _to_int(d.get("position_unix", 0))
+    if pu > 0:
+        return pu
+    return _to_int(d.get("position_id", 0))
+
+
+def _iter_all_positions():
+    """Достаём все позиции без фильтра. Поддержка и get_all(), и gets()."""
+    try:
+        items = Positionx.get_all() or []
+    except Exception:
+        try:
+            items = Positionx.gets() or []  # если твой gets работает без фильтров
+        except TypeError:
+            items = []
+    return items
+
+
+def _pos_is_active(d: dict) -> bool:
+    """Считаем активным всё, что НЕ со статусом 2 (подстрой при необходимости)."""
+    return _to_int(d.get("position_status", 0)) != 2
+
+
+def _pos_to_public_dict(pos) -> dict:
+    """Если у тебя уже есть _pos_to_dict, используй его. Иначе – лёгкий слепок."""
+    try:
+        return _pos_to_dict(pos)
+    except NameError:
+        return {
+            "position_id": getattr(pos, "position_id", 0),
+            "position_unix": getattr(pos, "position_unix", 0),
+            "position_name": getattr(pos, "position_name", ""),
+            "position_price": getattr(pos, "position_price", 0),
+            "position_desc": getattr(pos, "position_desc", ""),
+            "category_id": getattr(pos, "category_id", 0),
+            "worker_id": getattr(pos, "worker_id", 0),
+            "position_status": getattr(pos, "position_status", 0),
+        }
+
+
+async def _ensure_orders_all_dataset(state: FSMContext):
+    data = await state.get_data()
+    orders_map = data.get("orders_all_map")
+    orders_list = data.get("orders_all_list")
+    if orders_map is not None and orders_list is not None:
+        return orders_list, orders_map
+
+    mp = {}
+    keys = []
+    for pos in _iter_all_positions():
+        d = _pos_to_public_dict(pos)
+
+        # ✳️ Показываем только свободные заказы
+        if _to_int(d.get("worker_id", 0)) != 0:
+            continue
+
+        # Активные (если у тебя другой финальный статус — поправь _pos_is_active)
+        if not _pos_is_active(d):
+            continue
+
+        k = _order_key(d)
+        if k == 0 or str(k) in mp:
+            continue
+        mp[str(k)] = d
+        keys.append(k)
+
+    def sort_val(k: int) -> int:
+        dd = mp[str(k)]
+        pu = _to_int(dd.get("position_unix", 0))
+        return pu if pu > 0 else _to_int(dd.get("position_id", 0))
+
+    keys.sort(key=sort_val, reverse=True)
+    await state.update_data(orders_all_list=keys, orders_all_map=mp)
+    return keys, mp
+
+
+async def _show_orders_all_page(
+    msg_or_cb, page: int, state: FSMContext, per_page: int = 6
+):
+    keys, mp = await _ensure_orders_all_dataset(state)
+    total = len(keys)
+    last_page = max((total - 1) // per_page, 0)
+    page = max(0, min(page, last_page))
+    slice_keys = keys[page * per_page : page * per_page + per_page]
+
+    kb = _orders_all_kb(slice_keys, mp, page, per_page, total)
+    text = "<b>🧾 Актуальные заказы (все)</b>\nВыберите заказ:"
+
+    # выводим — если это коллбэк, пробуем edit_text
+    try:
+        if isinstance(msg_or_cb, CallbackQuery):
+            await msg_or_cb.message.edit_text(text, reply_markup=kb)
+            await msg_or_cb.answer()
+        else:
+            await msg_or_cb.answer(text, reply_markup=kb)
+    except Exception:
+        # на всякий случай fallback
+        if isinstance(msg_or_cb, CallbackQuery):
+            await msg_or_cb.message.answer(text, reply_markup=kb)
+            await msg_or_cb.answer()
+        else:
+            await msg_or_cb.answer(text, reply_markup=kb)
+
+    await state.update_data(orders_all_page=page, orders_all_per_page=per_page)
+
+
+# =============== Роуты ===============
+
+
 @router.message(F.text == "📝 Актуальные заказы")
 async def orders_root(message: Message, state: FSMContext):
+    # Показываем выбор режима: «Все» / «По категориям»
     await state.clear()
+    await message.answer(
+        "<b>Как показать заказы?</b>",
+        reply_markup=_orders_mode_kb(),
+    )
+    await state.set_state("orders_mode")
 
-    worker = Userx.get(user_id=message.from_user.id)
-    if not worker or not worker.city or not worker.specializations:
-        await message.answer(
-            "❗ Для просмотра актуальных заказов заполните профиль: город и специализации.",
-        )
+
+@router.callback_query(F.data == "orders:back_modes")
+async def orders_back_modes(cq: CallbackQuery, state: FSMContext):
+    await cq.message.edit_text(
+        "<b>Как показать заказы?</b>", reply_markup=_orders_mode_kb()
+    )
+    await cq.answer()
+    await state.set_state("orders_mode")
+
+
+# --- режим: ВСЕ ЗАКАЗЫ ---
+@router.callback_query(F.data == "orders:mode_all")
+async def orders_mode_all(cq: CallbackQuery, state: FSMContext):
+    # Сразу показываем первую страницу «все заказы»
+    await _show_orders_all_page(cq, page=0, state=state)
+    await state.set_state("orders_all")
+
+
+@router.callback_query(F.data.startswith("orders:all:p:"))
+async def orders_all_pagination(cq: CallbackQuery, state: FSMContext):
+    try:
+        page = int(cq.data.split(":")[-1])
+    except Exception:
+        page = 0
+    await _show_orders_all_page(cq, page=page, state=state)
+
+
+@router.callback_query(F.data.startswith("orders:open:"))
+async def orders_open(cq: CallbackQuery, state: FSMContext):
+    # Детальный просмотр выбранного заказа
+    key = cq.data.split(":")[-1]
+    data = await state.get_data()
+    mp = data.get("orders_all_map") or {}
+    item = mp.get(key)
+    if not item:
+        await cq.answer("Заказ не найден", show_alert=True)
         return
 
-    # Категории, доступные этому исполнителю по специализациям
+    # Красивый вывод деталей
+    name = html.escape(str(item.get("position_name", "—")))
+    price = item.get("position_price", 0)
+    price_txt = (
+        f"{price:,}".replace(",", " ") + " ₽"
+        if isinstance(price, int) and price > 0
+        else "договорная"
+    )
+    cat_id = item.get("category_id", 0)
+    status = item.get("position_status", 0)
+
+    text = (
+        f"<b>📦 Заказ</b>\n\n"
+        f"🧰 Категория: <code>{cat_id}</code>\n"
+        f"💬 Название: <code>{name}</code>\n"
+        f"💰 Бюджет: <code>{price_txt}</code>\n"
+        f"📌 Статус: <code>{status}</code>\n"
+        f"\nВыберите действие:"
+    )
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="← К списку", callback_data="orders:all:back")],
+            # тут можешь добавить «Откликнуться»/«Подробно», если у тебя есть обработчики
+        ]
+    )
+
+    try:
+        await cq.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await cq.message.answer(text, reply_markup=kb)
+    await cq.answer()
+
+
+@router.callback_query(F.data == "orders:all:back")
+async def orders_all_back(cq: CallbackQuery, state: FSMContext):
+    page = (await state.get_data()).get("orders_all_page", 0)
+    await _show_orders_all_page(cq, page=page, state=state)
+
+
+@router.callback_query(F.data == "orders:mode_cats")
+async def orders_mode_cats(cq: CallbackQuery, state: FSMContext):
+    worker = Userx.get(user_id=cq.from_user.id)
+    if not worker or not worker.city or not worker.specializations:
+        await cq.message.edit_text(
+            "❗ Для просмотра заказов по категориям заполните профиль: город и специализации.",
+            reply_markup=_orders_mode_kb(),
+        )
+        await cq.answer()
+        return
+
     allowed_cat_ids = _user_allowed_category_ids(worker)
     if not allowed_cat_ids:
-        await message.answer("<b>🔎 По вашим специализациям пока нет категорий.</b>")
+        await cq.message.edit_text(
+            "<b>🔎 По вашим специализациям пока нет категорий.</b>",
+            reply_markup=_orders_mode_kb(),
+        )
+        await cq.answer()
         return
 
-    await message.answer(
-        "<b>🔎 Выберите нужную вам категорию:</b>",
-        reply_markup=_orders_category_swipe(allowed_cat_ids, 0),
+    await cq.message.edit_text(
+        "<b>🔎 Выберите категорию:</b>",
+        reply_markup=_orders_category_kb_with_back(allowed_cat_ids, 0),
     )
+    await cq.answer()
     await state.set_state("orders_pick_category")
 
 
@@ -1472,43 +1914,96 @@ async def orders_cat_page(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
 @router.callback_query(
     StateFilter("orders_pick_category"), F.data.startswith("orders:cat_pick:")
 )
 async def orders_cat_pick(call: CallbackQuery, state: FSMContext):
-    _, _, cat_id_str, src_page = call.data.split(":")
-    cat_id = int(cat_id_str)
+    parts = call.data.split(":")
+    # формат: orders:cat_pick:{cat_id}:{src_page}
+    try:
+        _, _, cat_id_str, src_page = parts
+        cat_id = int(cat_id_str)
+    except Exception:
+        await call.answer("Ошибка данных.", show_alert=True)
+        return
 
-    # Забираем все заказы по этой категории и фильтруем под исполнителя
-    all_in_cat = Positionx.gets(category_id=cat_id)  # список позиций
+    # 1) Берём все заказы категории
+    all_in_cat = Positionx.gets(category_id=cat_id) or []
+
+    # 2) Показываем только свободные и активные
+    free_open = [
+        p
+        for p in all_in_cat
+        if getattr(p, "worker_id", 0) == 0
+        and int(getattr(p, "position_status", 0) or 0) != 2
+    ]
+
+    # 3) Фильтр под исполнителя (город/специализации и т.п.)
     worker = Userx.get(user_id=call.from_user.id)
-    filtered = _filter_orders_for_worker(all_in_cat, worker)
+    filtered = _filter_orders_for_worker(free_open, worker)
 
     if not filtered:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="← К категориям", callback_data="orders:mode_cats"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="← Режимы просмотра", callback_data="orders:back_modes"
+                    )
+                ],
+            ]
+        )
         await call.message.edit_text(
-            "Пока нет заказов по этой категории в вашем городе."
+            "Пока нет свободных заказов по этой категории в вашем городе.",
+            reply_markup=kb,
         )
         await call.answer()
         return
 
-    # Пагинация списка заказов
+    # 4) Ключ заказа: position_unix (если >0), иначе position_id
+    def _key_for(p) -> int:
+        pu = int(getattr(p, "position_unix", 0) or 0)
+        return pu if pu > 0 else int(getattr(p, "position_id", 0) or 0)
+
+    orders_list = []
+    orders_map = {}
+
+    for p in filtered:
+        key = _key_for(p)
+        if not key:
+            continue  # пропускаем совсем кривые записи
+        orders_list.append(key)
+        orders_map[str(key)] = {
+            "position_id": getattr(p, "position_id", 0),
+            "position_name": getattr(p, "position_name", ""),
+            "position_price": getattr(p, "position_price", 0),
+            "position_desc": getattr(p, "position_desc", ""),
+            "category_id": getattr(p, "category_id", 0),
+            "position_unix": getattr(p, "position_unix", 0),
+            "worker_id": getattr(p, "worker_id", 0),
+            "position_status": getattr(p, "position_status", 0),
+        }
+
+    # 5) Сортировка: новые выше (по punix, иначе по id)
+    def _sort_val(k: int) -> int:
+        d = orders_map[str(k)]
+        pu = int(d.get("position_unix", 0) or 0)
+        return pu if pu > 0 else int(d.get("position_id", 0) or 0)
+
+    orders_list = sorted(set(orders_list), key=_sort_val, reverse=True)
+
+    # 6) Пагинация/рендер
     await state.update_data(
         orders_cat_id=cat_id,
-        orders_list=[p.position_unix for p in filtered],
-        orders_map=json.dumps(
-            {
-                str(p.position_unix): {
-                    "position_id": p.position_id,
-                    "position_name": p.position_name,
-                    "position_price": p.position_price,
-                    "position_desc": p.position_desc,
-                    "category_id": p.category_id,
-                    "position_unix": p.position_unix,
-                }
-                for p in filtered
-            },
-            ensure_ascii=False,
-        ),
+        orders_list=orders_list,
+        orders_map=json.dumps(orders_map, ensure_ascii=False),
     )
 
     await _show_orders_page(call.message, cat_id, page=0, state=state)
@@ -1857,24 +2352,6 @@ def _pos_to_dict(pos) -> Dict[str, Any]:
     }
 
 
-def _collect_my_responses(worker_id: int) -> Dict[str, Any]:
-    """
-    Возвращает словарь:
-    {
-        "current": [punix, ...],
-        "done": [punix, ...],
-        "map": { punix_str: {позиция} }
-    }
-    """
-    current, done = [], []
-    mp: Dict[str, Dict[str, Any]] = {}
-
-    # Новые сверху
-    current.sort(reverse=True)
-    done.sort(reverse=True)
-    return {"current": current, "done": done, "map": mp}
-
-
 def _tabs_kb(
     current_count: int, done_count: int, active: str
 ) -> List[List[InlineKeyboardButton]]:
@@ -1974,17 +2451,26 @@ async def _show_myresp_tab(
         await state.update_data(myresp_data=dataset)
 
     order_map = dataset["map"]
-    current_list = dataset["current"]
-    done_list = dataset["done"]
+    current_list = dataset.get("current", []) or []
+    done_list = dataset.get("done", []) or []
 
     total_cur, total_done = len(current_list), len(done_list)
     source = current_list if tab == "current" else done_list
     total = len(source)
+
+    # Нормализация пагинации
+    if per_page <= 0:
+        per_page = 6
+    last_page = max((total - 1) // per_page, 0)
+    page = max(0, min(page, last_page))
+
     start = page * per_page
     items = source[start : start + per_page]
 
-    # Клава
-    kb = _list_kb(tab, items, order_map, page, per_page, total, worker_id)
+    # Клава: передаём tot_cur и tot_done
+    kb = _list_kb(
+        tab, items, order_map, page, per_page, total, worker_id, total_cur, total_done
+    )
     # Первая строка клавиатуры — вкладки; обновим их счетчиками корректно
     kb.inline_keyboard[0] = _tabs_kb(total_cur, total_done, tab)[0]
 
@@ -2267,10 +2753,10 @@ async def my_orders_root(message: Message, state: FSM):
     await _show_my_orders_page(message, page=0, state=state)
     await state.set_state("my_orders_list")
     # ДОБАВЛЯЕМ отдельной строкой кнопку «Все категории»
-    #await message.answer(
+    # await message.answer(
     #    "Или посмотреть сразу все ваши заказы:",
     #    reply_markup=client_myorders_all_button_kb(user_id),
-    #)
+    # )
 
 
 from aiogram.utils.keyboard import InlineKeyboardBuilder
