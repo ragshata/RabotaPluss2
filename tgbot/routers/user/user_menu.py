@@ -3217,13 +3217,11 @@ async def prod_position_edit_desc_get(
     await position_open_admin(bot, message.from_user.id, position_id, position_unix)
 
 
-@router.message(F.text == "📝 Управление заказами")
-async def admin_products(message: Message, bot: Bot, state: FSM, arSession: ARS):
+@router.message(F.text.in_(("➕ Создать заказ",)))
+async def start_order(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "<b>🧑🏻‍💻 Создание и изменение заказов</b>",
-        reply_markup=items_frep_client(),
-    )
+    await message.answer("<b>🏙 Выберите город:</b>", reply_markup=cities_swipe(0))
+    await state.set_state("order_city")
 
 
 ################################################################################
