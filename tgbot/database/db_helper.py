@@ -276,7 +276,7 @@ def create_dbx():
 
         ############################################################
         # Создание таблицы с хранением - клиентов
-        if len(con.execute("PRAGMA table_info(storage_clients)").fetchall()) == 11:
+        if len(con.execute("PRAGMA table_info(storage_clients)").fetchall()) == 16:
             print("DB was found(9/12)")
         else:
             con.execute(
@@ -293,7 +293,12 @@ def create_dbx():
                         client_unix INTEGER,
                         client_rlname TEXT,
                         client_surname TEXT,
-                        client_number TEXT
+                        client_number TEXT,
+                        sub_started_unix INTEGER,
+                        sub_trial_until INTEGER,
+                        sub_paid_until INTEGER,
+                        sub_is_trial INTEGER,
+                        sub_status TEXT
                     )
                 """
                 )
@@ -359,7 +364,8 @@ def create_dbx():
             print("DB was found(12/12)")
         else:
             con.execute(
-                ded(f"""
+                ded(
+                    f"""
                     CREATE TABLE storage_responses(
                         increment INTEGER PRIMARY KEY AUTOINCREMENT,
                         response_id INTEGER,
@@ -370,7 +376,8 @@ def create_dbx():
                         status INTEGER,
                         response_unix INTEGER
                     )
-                """)
+                """
+                )
             )
             # необязательно, но полезно: уникальный отклик на заказ от одного исполнителя
             try:

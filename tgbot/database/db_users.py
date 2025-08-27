@@ -231,13 +231,18 @@ class ClientModel(BaseModel):
     client_rlname: str
     client_surname: str
     client_number: int
+    # --- ПОДПИСКА ---
+    sub_started_unix: int = 0
+    sub_trial_until: int = 0
+    sub_paid_until: int = 0
+    sub_is_trial: int = 0
+    sub_status: str = "inactive"  # 'active' / 'inactive'
 
 
-# Работа с юзером-заказчиком
+# Clientx.add — дополним INSERT
 class Clientx:
     storage_name = "storage_clients"
 
-    # Добавление записи
     @staticmethod
     def add(
         client_id: int,
@@ -251,25 +256,24 @@ class Clientx:
         client_refill = 0
         client_give = 0
         client_unix = get_unix()
+        # подписка — по умолчанию пустая
+        sub_started_unix = 0
+        sub_trial_until = 0
+        sub_paid_until = 0
+        sub_is_trial = 0
+        sub_status = "inactive"
 
         with sqlite3.connect(PATH_DATABASE) as con:
             con.row_factory = dict_factory
-
             con.execute(
                 ded(
                     f"""
                     INSERT INTO {Clientx.storage_name} (
-                        client_id,
-                        client_login,
-                        client_name,
-                        client_balance,
-                        client_refill,
-                        client_give,
-                        client_unix,
-                        client_rlname,
-                        client_surname,
-                        client_number
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        client_id, client_login, client_name,
+                        client_balance, client_refill, client_give,
+                        client_unix, client_rlname, client_surname, client_number,
+                        sub_started_unix, sub_trial_until, sub_paid_until, sub_is_trial, sub_status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """
                 ),
                 [
@@ -283,6 +287,11 @@ class Clientx:
                     client_rlname,
                     client_surname,
                     client_number,
+                    sub_started_unix,
+                    sub_trial_until,
+                    sub_paid_until,
+                    sub_is_trial,
+                    sub_status,
                 ],
             )
 

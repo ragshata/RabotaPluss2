@@ -51,16 +51,21 @@ def user_profile_finl(user: Optional[object] = None) -> InlineKeyboardMarkup:
     )
 
 
+# tgbot/keyboards/inline_user_page.py
+from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+from aiogram.types import InlineKeyboardMarkup
+from tgbot.utils.const_functions import ikb
+
+
 def client_profile_finl() -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardBuilder()
+    kb = IKB()
 
-    keyboard.row(
-        ikb("💰 Вывести", data="client_withdraw"),
-    ).row(
-        ikb("💸 Пополнить баланс", data="client_refill"),
-    )
+    # Пример безопасных кнопок профиля — оставь, какие у тебя есть
+    kb.row(ikb("✏️ Редактировать профиль", data="profile:edit"))
+    kb.row(ikb("💳 Подписка", data="client:subscription"))  # <-- добавили здесь
 
-    return keyboard.as_markup()
+    # НИГДЕ НЕ ДОБАВЛЯЕМ «Пополнить баланс» и «Вывести»
+    return kb.as_markup()
 
 
 @router.callback_query(F.data == "client_refill")

@@ -31,6 +31,7 @@ from tgbot.keyboards.inline_admin_prod import (
     category_edit_open_finl,
     knowledge_base,
     position_edit_cancel_finl,
+    position_edit_open_finl,
     privacy_policy,
     users_admire,
 )
@@ -46,6 +47,7 @@ from tgbot.keyboards.reply_main import (
     order_category,
     user_functions_codexk,
 )
+from tgbot.routers.user.user_products import confirm_tusk_button
 from tgbot.utils.const_functions import (
     clear_html,
     ded,
@@ -61,6 +63,15 @@ from tgbot.utils.misc_functions import (
     upload_text,
     insert_tags,
     get_items_available,
+)
+from tgbot.utils.subscriptions_in_clients import (
+    _human,
+    client_sub_get,
+    client_sub_is_active,
+    client_sub_start_free_month,
+    paywall_text,
+    subscribe_kb,
+    subscribe_kb_contact_admin,
 )
 from tgbot.utils.text_functions import (
     category_open_admin,
@@ -264,7 +275,7 @@ def confirm_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Подтвердить", callback_data="order:confirm_ok"
+                    text="✅ Подтвердить", callback_data="order:confirm"
                 )
             ],
             [
@@ -284,11 +295,129 @@ def _parse_date(s: str):
         return None
 
 
-# ────────────────────────── Старт сценария ──────────────────────────
+@router.message(F.text.in_(("Подписка", "/subscribe")))
+async def sub_status(message: Message):
+    c = client_sub_get(message.from_user.id)
+    if not c or int(getattr(c, "sub_paid_until", 0) or 0) <= 0:
+        await message.answer(paywall_text(), reply_markup=subscribe_kb_contact_admin())
+        return
 
+    if client_sub_is_active(message.from_user.id):
+        await message.answer(
+            f"🔔 Подписка активна до <code>{_human(c.sub_paid_until)}</code>."
+        )
+    else:
+        await message.answer(
+            f"⛔ Подписка истекла <code>{_human(c.sub_paid_until)}</code>.",
+            reply_markup=subscribe_kb_contact_admin(),
+        )
+
+
+# ────────────────────────── Старт сценария ──────────────────────────
+# где у тебя router = Router()
+from aiogram import F
+from aiogram.types import CallbackQuery
+
+
+@router.callback_query(F.data == "sub:info")
+async def sub_info(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer(
+        "Подписка открывает возможность создавать заказы.\n"
+        "Первый месяц — бесплатно, потом 100 ₽ в неделю.\n"
+        "Оплата проводится через администратора.",
+        disable_web_page_preview=True,
+    )
+
+
+@router.callback_query(F.data == "sub:pay")
+async def sub_pay(call: CallbackQuery):
+    await call.answer()
+    settings = Settingsx.get()
+    await call.message.answer(
+        "<b>☎️ Нажмите кнопку ниже для связи с Администратором для оплаты.</b>",
+        reply_markup=user_support_finl(settings.misc_support),
+    )
+import time
+from datetime import datetime
+
+def _to_int_unix(v) -> int:
+    """
+    Приводим v к unix-времени в СЕКУНДАХ.
+    Поддерживает int/str, возможно миллисекунды, поддержка 'ДД.ММ.ГГГГ'.
+    """
+    if v is None:
+        return 0
+
+    # уже int?
+    if isinstance(v, int):
+        # если похоже на миллисекунды (13 знаков) — переведём в секунды
+        return v // 1000 if v > 10**12 else v
+
+    s = str(v).strip()
+    if not s:
+        return 0
+
+    # чистые цифры
+    if s.isdigit():
+        val = int(s)
+        return val // 1000 if val > 10**12 else val
+
+    # формат ДД.ММ.ГГГГ
+    try:
+        dt = datetime.strptime(s, "%d.%m.%Y")
+        return int(dt.timestamp())
+    except Exception:
+        return 0
+
+
+def get_client_sub_active_until(client) -> int:
+    """
+    Возвращает unix до какого момента действует подписка
+    (берём максимум из trial и paid), не глядя на текст статуса.
+    """
+    trial_u = _to_int_unix(getattr(client, "sub_trial_until", 0))
+    paid_u  = _to_int_unix(getattr(client, "sub_paid_until", 0))
+    return max(trial_u, paid_u)
+
+
+def is_client_sub_active(client) -> bool:
+    return get_client_sub_active_until(client) > int(time.time())
+
+
+from aiogram.types import Message
+from aiogram.fsm.context import FSMContext
+
+from tgbot.database.db_users import Clientx
 
 @router.message(F.text.in_(("➕ Создать заказ",)))
 async def start_order(message: Message, state: FSMContext):
+    # 1) достаём клиента
+    client = Clientx.get(client_id=message.from_user.id)
+
+    # 2) если в БД ещё нет записи клиента — создайте (или блокируйте)
+    if not client:
+        # (опционально) создать запись клиента
+        # Clientx.add(message.from_user.id, message.from_user.username or "", message.from_user.full_name or "", "", "", 0)
+        # client = Clientx.get(client_id=message.from_user.id)
+        # Либо сразу просить завести профиль:
+        await message.answer(
+            "Пожалуйста, откройте профиль заказчика и заполните данные перед созданием заказа."
+        )
+        return
+
+    # 3) проверяем только по дате действия
+    if not is_client_sub_active(client):
+        await message.answer(
+            "<b>🔒 Подписка нужна для создания заказов</b>\n\n"
+            "Первый месяц — бесплатно.\n"
+            "Далее — 100 ₽ в неделю.\n\n"
+            "Оформите подписку, чтобы продолжить.",
+            reply_markup=subscribe_kb(),  # ваша кнопка «Подписка»
+        )
+        return
+
+    # ---- дальше обычный сценарий создания заказа ----
     await state.clear()
     await message.answer("<b>🏙 Выберите город:</b>", reply_markup=cities_swipe(0))
     await state.set_state("order_city")
@@ -610,20 +739,6 @@ async def photos_skip(cq: CallbackQuery, state: FSMContext):
     await proceed_to_next_step(state, cq)
 
 
-# ────────────────────────── Клавиатура подтверждения ──────────────────────────
-def confirm_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Подтвердить", callback_data="order:confirm"
-                )
-            ],
-            [InlineKeyboardButton(text="✏️ Изменить", callback_data="order:edit")],
-        ]
-    )
-
-
 # ────────────────────────── Комментарий → Подтверждение ──────────────────────────
 @router.message(StateFilter("order_comment"))
 async def get_comment(message: Message, state: FSMContext):
@@ -682,6 +797,7 @@ async def _show_confirmation(msg: Message, state: FSMContext):
         f"💬 Комментарий: {comment if comment else '—'}"
     )
     await msg.answer(txt, reply_markup=confirm_kb())
+    await state.set_state("order_confirm")
 
 
 # ────────────────────────── Обработка «Подтвердить / Изменить» ──────────────────────────
@@ -1586,7 +1702,6 @@ from aiogram.fsm.context import FSMContext
 import html
 from textwrap import shorten
 
-router = Router()
 
 # =============== Клавиатуры ===============
 
@@ -1601,60 +1716,47 @@ def _orders_mode_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    text="🗂 По категориям", callback_data="orders:mode_cats"
+                    text="🗂 Заказы из моего города ", callback_data="orders:mode_cats"
                 )
             ],
         ]
     )
 
 
-def _orders_all_kb(
-    keys, order_map, page: int, per_page: int, total: int
-) -> InlineKeyboardMarkup:
+def _orders_all_kb(slice_keys, mp, page, per_page, total) -> InlineKeyboardMarkup:
     rows = []
-
-    # Кнопки заказов (по одной в строке)
-    for k in keys:
-        d = order_map[str(k)]
-        name = d.get("position_name") or d.get("name") or "Без названия"
-        name = html.unescape(str(name))
-        name = shorten(name, width=36, placeholder="…")
-        price = d.get("position_price", 0)
-        price_txt = (
-            f"{price:,}".replace(",", " ") + " ₽"
-            if isinstance(price, int) and price > 0
-            else "договорная"
-        )
+    # строки заказов
+    for k in slice_keys:
+        rec = mp.get(str(k), {})
+        name = rec.get("position_name", "") or "Без названия"
+        price = int(rec.get("position_price", 0) or 0)
+        label_price = f" • {price:,}".replace(",", " ") + " ₽" if price > 0 else ""
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{name} · {price_txt}", callback_data=f"orders:open:{k}"
+                    text=f"📦 {name}{label_price}",
+                    callback_data=f"orders:all:view:{k}:{page}",
                 )
             ]
         )
 
-    # Пагинация
+    # пагинация
     last_page = max((total - 1) // per_page, 0)
-    nav = []
-    if page > 0:
-        nav.append(
-            InlineKeyboardButton(text="« Назад", callback_data=f"orders:all:p:{page-1}")
-        )
-    nav.append(
-        InlineKeyboardButton(
-            text=f"{page+1}/{last_page+1}", callback_data="orders:noop"
-        )
+    prev_btn = InlineKeyboardButton(
+        text="«", callback_data=f"orders:all:page:{max(page-1,0)}"
     )
-    if page < last_page:
-        nav.append(
-            InlineKeyboardButton(
-                text="Вперёд »", callback_data=f"orders:all:p:{page+1}"
-            )
-        )
-    if nav:
-        rows.append(nav)
+    next_btn = InlineKeyboardButton(
+        text="»", callback_data=f"orders:all:page:{min(page+1, last_page)}"
+    )
+    rows.append(
+        [
+            prev_btn,
+            InlineKeyboardButton(text=f"{page+1}/{last_page+1}", callback_data="noop"),
+            next_btn,
+        ]
+    )
 
-    # Кнопка «← Режимы»
+    # назад к режимам
     rows.append(
         [
             InlineKeyboardButton(
@@ -1662,7 +1764,6 @@ def _orders_all_kb(
             )
         ]
     )
-
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1718,39 +1819,92 @@ def _pos_to_public_dict(pos) -> dict:
         }
 
 
+import json, html, re
+from aiogram import F
+from aiogram.types import (
+    CallbackQuery,
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto,
+)
+from aiogram.fsm.context import FSMContext
+
+
+def _ext_from_desc(position_desc: str) -> dict:
+    if not position_desc:
+        return {}
+    s = str(position_desc)
+    if s.startswith("[ORDER]"):
+        try:
+            _, js = s.split("\n", 1)
+            return json.loads(js)
+        except Exception:
+            return {}
+    return {}
+
+
+def _key_for(p) -> int:
+    pu = int(getattr(p, "position_unix", 0) or 0)
+    return pu if pu > 0 else int(getattr(p, "position_id", 0) or 0)
+
+
+def _sort_val(rec: dict) -> int:
+    pu = int(rec.get("position_unix", 0) or 0)
+    return pu if pu > 0 else int(rec.get("position_id", 0) or 0)
+
+
+def _budget_text(price: int, ext_budget) -> str:
+    if isinstance(price, int) and price > 0:
+        return f"{price:,}".replace(",", " ") + " руб."
+    return html.escape(str(ext_budget or "договорная"))
+
+
 async def _ensure_orders_all_dataset(state: FSMContext):
     data = await state.get_data()
-    orders_map = data.get("orders_all_map")
-    orders_list = data.get("orders_all_list")
-    if orders_map is not None and orders_list is not None:
-        return orders_list, orders_map
+    keys = data.get("orders_all_list")
+    mp_json = data.get("orders_all_map")
+    if keys and mp_json:
+        try:
+            return keys, json.loads(mp_json)
+        except Exception:
+            pass
 
-    mp = {}
-    keys = []
-    for pos in _iter_all_positions():
-        d = _pos_to_public_dict(pos)
-
-        # ✳️ Показываем только свободные заказы
-        if _to_int(d.get("worker_id", 0)) != 0:
+    # забираем только свободные и активные
+    # (если ваш ORM не поддерживает пустой gets(), можно сделать gets(worker_id=0))
+    all_free = Positionx.gets(worker_id=0) or []
+    records = []
+    for p in all_free:
+        if int(getattr(p, "position_status", 0) or 0) == 2:
             continue
-
-        # Активные (если у тебя другой финальный статус — поправь _pos_is_active)
-        if not _pos_is_active(d):
+        k = _key_for(p)
+        if not k:
             continue
+        records.append(
+            {
+                "position_id": getattr(p, "position_id", 0),
+                "position_name": getattr(p, "position_name", ""),
+                "position_price": int(getattr(p, "position_price", 0) or 0),
+                "position_desc": getattr(p, "position_desc", ""),
+                "category_id": getattr(p, "category_id", 0),
+                "position_unix": getattr(p, "position_unix", 0),
+                "worker_id": getattr(p, "worker_id", 0),
+                "position_status": getattr(p, "position_status", 0),
+            }
+        )
 
-        k = _order_key(d)
-        if k == 0 or str(k) in mp:
-            continue
-        mp[str(k)] = d
-        keys.append(k)
+    # сортировка: новые выше
+    records.sort(key=_sort_val, reverse=True)
+    mp = {
+        str(_key_for_obj := (rec["position_unix"] or rec["position_id"])): rec
+        for rec in records
+    }
+    keys = [int(k) for k in mp.keys()]
 
-    def sort_val(k: int) -> int:
-        dd = mp[str(k)]
-        pu = _to_int(dd.get("position_unix", 0))
-        return pu if pu > 0 else _to_int(dd.get("position_id", 0))
-
-    keys.sort(key=sort_val, reverse=True)
-    await state.update_data(orders_all_list=keys, orders_all_map=mp)
+    await state.update_data(
+        orders_all_list=keys,
+        orders_all_map=json.dumps(mp, ensure_ascii=False),
+    )
     return keys, mp
 
 
@@ -1766,7 +1920,6 @@ async def _show_orders_all_page(
     kb = _orders_all_kb(slice_keys, mp, page, per_page, total)
     text = "<b>🧾 Актуальные заказы (все)</b>\nВыберите заказ:"
 
-    # выводим — если это коллбэк, пробуем edit_text
     try:
         if isinstance(msg_or_cb, CallbackQuery):
             await msg_or_cb.message.edit_text(text, reply_markup=kb)
@@ -1774,7 +1927,6 @@ async def _show_orders_all_page(
         else:
             await msg_or_cb.answer(text, reply_markup=kb)
     except Exception:
-        # на всякий случай fallback
         if isinstance(msg_or_cb, CallbackQuery):
             await msg_or_cb.message.answer(text, reply_markup=kb)
             await msg_or_cb.answer()
@@ -1815,6 +1967,264 @@ async def orders_mode_all(cq: CallbackQuery, state: FSMContext):
     await state.set_state("orders_all")
 
 
+@router.callback_query(StateFilter("orders_all"), F.data.startswith("orders:all:page:"))
+async def orders_all_page(cq: CallbackQuery, state: FSMContext):
+    page = int(cq.data.split(":")[-1])
+    await _show_orders_all_page(cq, page=page, state=state)
+    await cq.answer()
+
+
+import json
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
+def _ext_from_desc(position_desc: str) -> dict:
+    if not position_desc:
+        return {}
+    s = str(position_desc)
+    if s.startswith("[ORDER]"):
+        try:
+            _, js = s.split("\n", 1)
+            return json.loads(js)
+        except Exception:
+            return {}
+    return {}
+
+
+@router.callback_query(StateFilter("orders_all"), F.data.startswith("orders:all:view:"))
+async def orders_all_view(cq: CallbackQuery, state: FSMContext):
+    # data: orders:all:view:{punix}:{page}
+    try:
+        _, _, _, punix_str, page_str = cq.data.split(":")
+        punix = int(punix_str)
+        page = int(page_str)
+    except Exception:
+        await cq.answer("Ошибка данных", show_alert=True)
+        return
+
+    data = await state.get_data()
+    # карта создаётся в _show_orders_all_page / _ensure_orders_all_dataset
+    mp_json = data.get("orders_all_map") or "{}"
+    try:
+        mp = json.loads(mp_json)
+    except Exception:
+        mp = {}
+
+    rec = mp.get(str(punix))
+    if not rec:
+        # на всякий — подтянем напрямую
+        pos = Positionx.get(position_unix=punix)
+        if not pos:
+            await cq.answer("Заказ не найден.", show_alert=True)
+            return
+        rec = {
+            "position_id": getattr(pos, "position_id", 0),
+            "position_name": getattr(pos, "position_name", ""),
+            "position_price": getattr(pos, "position_price", 0),
+            "position_desc": getattr(pos, "position_desc", ""),
+            "category_id": getattr(pos, "category_id", 0),
+            "position_unix": getattr(pos, "position_unix", 0),
+            "worker_id": getattr(pos, "worker_id", 0),
+            "position_status": getattr(pos, "position_status", 0),
+        }
+
+    ext = _ext_from_desc(rec.get("position_desc", ""))
+
+    cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
+    cat_ids = ext.get("categories") or (
+        [rec.get("category_id")] if rec.get("category_id") else []
+    )
+    cats_text = (
+        ", ".join([cats_map.get(cid, str(cid)) for cid in cat_ids]) if cat_ids else "—"
+    )
+
+    budget = int(rec.get("position_price", 0) or 0)
+    budget_text = (
+        f"{budget} руб." if budget > 0 else (ext.get("budget") or "договорная")
+    )
+    city = ext.get("city", "—")
+    address = ext.get("address", "—")
+    dates = ext.get("dates", "—")
+    desc = ext.get("raw_desc", rec.get("position_name", ""))
+
+    txt = (
+        "<b>Заказ</b>\n\n"
+        f"🏙 Город: <code>{city}</code>\n"
+        f"📍 Адрес: <code>{address}</code>\n"
+        f"🧰 Категории: <code>{cats_text}</code>\n"
+        f"💰 Бюджет: <code>{budget_text}</code>\n"
+        f"📅 Сроки: <code>{dates}</code>\n\n"
+        "📝 Описание:\n"
+        f"{desc}"
+    )
+
+    # Кнопки: согласиться (если свободный) + назад
+    worker_id = cq.from_user.id
+    already_taken = int(rec.get("worker_id", 0) or 0) != 0
+    buttons = []
+    if not already_taken:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ Согласиться на заказ",
+                    callback_data=f"orders:all:agree:{punix}:{page}",
+                )
+            ]
+        )
+    else:
+        buttons.append(
+            [InlineKeyboardButton(text="⛔ Заказ уже занят", callback_data="noop")]
+        )
+
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад к списку", callback_data=f"orders:all:page:{page}"
+            )
+        ]
+    )
+    buttons.append(
+        [
+            InlineKeyboardButton(
+                text="← Режимы просмотра", callback_data="orders:back_modes"
+            )
+        ]
+    )
+
+    await cq.message.edit_text(
+        txt, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await cq.answer()
+
+
+from aiogram import Bot
+
+import json, html
+from aiogram import F
+from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+from aiogram import Bot
+from tgbot.utils.const_functions import ded
+
+# convert_date может быть в другом модуле — если у тебя другой импорт, поправь
+try:
+    from tgbot.utils.const_functions import convert_date
+except Exception:
+    convert_date = None
+
+
+@router.callback_query(
+    StateFilter("orders_all"), F.data.startswith("orders:all:agree:")
+)
+async def orders_all_agree(cq: CallbackQuery, state: FSMContext, bot: Bot):
+    # data: orders:all:agree:{punix}:{page}
+    try:
+        _, _, _, punix_str, page_str = cq.data.split(":")
+        punix = int(punix_str)
+        page = int(page_str)
+    except Exception:
+        await cq.answer("Ошибка данных", show_alert=True)
+        return
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await cq.answer("Заказ не найден.", show_alert=True)
+        return
+
+    # доступен?
+    if (
+        int(getattr(pos, "worker_id", 0) or 0) != 0
+        or int(getattr(pos, "position_status", 0) or 0) == 2
+    ):
+        await cq.answer("Этот заказ уже недоступен.", show_alert=True)
+        await _show_orders_all_page(cq, page=page, state=state)
+        return
+
+    worker_id = cq.from_user.id
+
+    # 1) назначаем исполнителя и переводим в «в работе»
+    try:
+        _update_position_by_unix(punix, worker_id=worker_id, position_status=1)
+    except Exception:
+        await cq.answer("Не удалось взять заказ. Попробуйте ещё раз.", show_alert=True)
+        return
+
+    # 2) Показать исполнителю «Ждите ответа заказчика»
+    try:
+        await cq.message.edit_text("<b>🔄 Ждите ответа заказчика</b>")
+    except Exception:
+        pass
+
+    # 3) Отправить заказчику карточку-уведомление с кнопками подтверждения (твоя логика)
+    try:
+        get_position = Positionx.get(position_unix=punix)
+        get_user = Userx.get(user_id=worker_id)
+        client_id = int(get_position.position_id)  # id заказчика
+        purchase_price = round(float(get_position.position_price or 0), 2)
+        if get_user:
+            rating_val = getattr(get_user, "user_rating_avg", None)
+            user_rating = round(rating_val, 2) if rating_val else "Нет оценок"
+            reg_date = (
+                convert_date(get_user.user_unix, False, False)
+                if convert_date
+                else str(get_user.user_unix)
+            )
+            user_name = (
+                f"{get_user.user_name or ''} {get_user.user_surname or ''}".strip()
+                or "Исполнитель"
+            )
+        else:
+            user_rating = "Нет оценок"
+            reg_date = "-"
+            user_name = "Исполнитель"
+
+        await bot.send_message(
+            chat_id=client_id,
+            text=ded(
+                f"""
+                <b>📦 Исполнитель отправил заявку на выполнение вашего заказа:</b>
+                ➖➖➖➖➖➖➖➖➖➖
+                ▪️ Заказ: <code>{html.escape(get_position.position_name or 'Заказ')}</code>
+                ▪️ Цена: <code>{purchase_price}₽</code>
+
+                <b>👤 Профиль исполнителя:</b>
+                🆔 Имя: <code>{html.escape(user_name)}</code>
+                ⭐ Средняя оценка: <code>{user_rating}</code>
+                🕰 Регистрация: <code>{html.escape(reg_date)}</code>
+            """
+            ),
+            reply_markup=confirm_tusk_button(
+                int(get_position.position_id),
+                purchase_price,
+                worker_id,
+                int(get_position.position_unix or 0),
+            ),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        # не критично, если заказчик не запускал бота — просто игнорируем
+        pass
+
+    # 4) Обновляем кэш «все заказы», чтобы убрать взятый заказ
+    data = await state.get_data()
+    lst = list(data.get("orders_all_list") or [])
+    try:
+        mp = json.loads(data.get("orders_all_map") or "{}")
+    except Exception:
+        mp = {}
+    if punix in lst:
+        lst = [k for k in lst if k != punix]
+    mp.pop(str(punix), None)
+    await state.update_data(
+        orders_all_list=lst,
+        orders_all_map=json.dumps(mp, ensure_ascii=False),
+    )
+
+    await cq.answer("Вы отправили заявку заказчику ✔️")
+    # при желании можно вернуть список:
+    # await _show_orders_all_page(cq, page=page, state=state)
+
+
 @router.callback_query(F.data.startswith("orders:all:p:"))
 async def orders_all_pagination(cq: CallbackQuery, state: FSMContext):
     try:
@@ -1824,48 +2234,158 @@ async def orders_all_pagination(cq: CallbackQuery, state: FSMContext):
     await _show_orders_all_page(cq, page=page, state=state)
 
 
+import json, html
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from aiogram.fsm.context import FSMContext
+from aiogram import F
+from aiogram.types import CallbackQuery
+
+
+def _ext_from_desc(position_desc: str) -> dict:
+    if not position_desc:
+        return {}
+    s = str(position_desc)
+    if s.startswith("[ORDER]"):
+        try:
+            _, js = s.split("\n", 1)
+            return json.loads(js)
+        except Exception:
+            return {}
+    return {}
+
+
 @router.callback_query(F.data.startswith("orders:open:"))
 async def orders_open(cq: CallbackQuery, state: FSMContext):
-    # Детальный просмотр выбранного заказа
-    key = cq.data.split(":")[-1]
-    data = await state.get_data()
-    mp = data.get("orders_all_map") or {}
-    item = mp.get(key)
-    if not item:
-        await cq.answer("Заказ не найден", show_alert=True)
+    # Поддерживаем два формата:
+    #  - orders:open:{punix}
+    #  - orders:open:{punix}:{page}
+    parts = cq.data.split(":")
+    try:
+        punix = int(parts[2])
+        if len(parts) > 3:
+            page = int(parts[3])
+        else:
+            data_tmp = await state.get_data()
+            page = int(data_tmp.get("orders_all_page", 0) or 0)
+    except Exception:
+        await cq.answer("Ошибка данных.", show_alert=True)
         return
 
-    # Красивый вывод деталей
-    name = html.escape(str(item.get("position_name", "—")))
-    price = item.get("position_price", 0)
-    price_txt = (
-        f"{price:,}".replace(",", " ") + " ₽"
-        if isinstance(price, int) and price > 0
-        else "договорная"
-    )
-    cat_id = item.get("category_id", 0)
-    status = item.get("position_status", 0)
+    data = await state.get_data()
+    mp_json = data.get("orders_all_map") or "{}"
+    try:
+        mp = json.loads(mp_json)
+    except Exception:
+        mp = {}
 
-    text = (
-        f"<b>📦 Заказ</b>\n\n"
-        f"🧰 Категория: <code>{cat_id}</code>\n"
-        f"💬 Название: <code>{name}</code>\n"
-        f"💰 Бюджет: <code>{price_txt}</code>\n"
-        f"📌 Статус: <code>{status}</code>\n"
-        f"\nВыберите действие:"
+    rec = mp.get(str(punix))
+    if not rec:
+        pos = Positionx.get(position_unix=punix)
+        if not pos:
+            await cq.answer("Заказ не найден.", show_alert=True)
+            return
+        rec = {
+            "position_id": getattr(pos, "position_id", 0),
+            "position_name": getattr(pos, "position_name", ""),
+            "position_price": int(getattr(pos, "position_price", 0) or 0),
+            "position_desc": getattr(pos, "position_desc", ""),
+            "category_id": getattr(pos, "category_id", 0),
+            "position_unix": getattr(pos, "position_unix", 0),
+            "worker_id": getattr(pos, "worker_id", 0),
+            "position_status": getattr(pos, "position_status", 0),
+        }
+
+    ext = _ext_from_desc(rec.get("position_desc", ""))
+
+    # --- Поля для вывода (с экранированием как в _show_confirmation) ---
+    city = html.escape(str(ext.get("city", "—")))
+    address = html.escape(str(ext.get("address", "—")))
+    dates = html.escape(str(ext.get("dates", "—")))
+    desc = html.escape(str(ext.get("raw_desc", rec.get("position_name", ""))))
+
+    price = int(rec.get("position_price", 0) or 0)
+    if price > 0:
+        budget_text = f"{price:,}".replace(",", " ") + " руб."
+    else:
+        budget_text = html.escape(str(ext.get("budget", "договорная")))
+
+    photos = list(ext.get("photos", []) or [])[:5]
+
+    cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
+    cat_ids = ext.get("categories") or (
+        [rec.get("category_id")] if rec.get("category_id") else []
+    )
+    cats_titles = [cats_map.get(cid, str(cid)) for cid in cat_ids]
+    cats_text = html.escape(", ".join(cats_titles)) if cats_titles else "—"
+
+    # --- Если есть фото — отправим медиа-группу (без подписи) ---
+    if photos:
+        media = [InputMediaPhoto(type="photo", media=fid) for fid in photos]
+        try:
+            await cq.message.answer_media_group(media=media)
+        except Exception:
+            # не критично — просто пропустим отправку фото
+            pass
+
+    # --- Текст карточки ---
+    txt = (
+        f"<b>Заказ</b>\n\n"
+        f"🏙 Город: <code>{city}</code>\n"
+        f"📍 Адрес: <code>{address}</code>\n"
+        f"🧰 Категории: <code>{cats_text}</code>\n\n"
+        f"📝 Описание:\n{desc}\n\n"
+        f"💰 Бюджет: <code>{budget_text}</code>\n"
+        f"📅 Сроки: <code>{dates}</code>\n"
+        f"🖼 Фото: <code>{len(photos)} шт.</code>"
     )
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="← К списку", callback_data="orders:all:back")],
-            # тут можешь добавить «Откликнуться»/«Подробно», если у тебя есть обработчики
+    # --- Кнопки: «Согласиться» (если свободен), назад к списку, назад к режимам ---
+    is_free = (
+        int(rec.get("worker_id", 0) or 0) == 0
+        and int(rec.get("position_status", 0) or 0) != 2
+    )
+    rows = []
+    if is_free:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ Согласиться на заказ",
+                    callback_data=f"orders:all:agree:{punix}:{page}",
+                )
+            ]
+        )
+    else:
+        rows.append(
+            [InlineKeyboardButton(text="⛔ Заказ недоступен", callback_data="noop")]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад к списку", callback_data=f"orders:all:page:{page}"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="← Режимы просмотра", callback_data="orders:back_modes"
+            )
         ]
     )
 
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    # Публикация карточки
     try:
-        await cq.message.edit_text(text, reply_markup=kb)
+        await cq.message.answer(txt, reply_markup=kb)
     except Exception:
-        await cq.message.answer(text, reply_markup=kb)
+        # fallback через edit_text, если нужно переписать предыдущее сообщение
+        try:
+            await cq.message.edit_text(txt, reply_markup=kb)
+        except Exception:
+            pass
+
     await cq.answer()
 
 
@@ -2055,67 +2575,269 @@ def _find_by_pid_punix(state_data, pid: int, punix: int) -> Optional[Dict[str, A
     return None
 
 
+import html, json
+from aiogram import F
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto,
+)
+from aiogram.fsm.context import FSMContext
+
+
+def _budget_text(price: int, ext_budget) -> str:
+    return (
+        (f"{price:,}".replace(",", " ") + " руб.")
+        if (isinstance(price, int) and price > 0)
+        else html.escape(str(ext_budget or "договорная"))
+    )
+
+
 @router.callback_query(F.data.startswith("orders:view:"))
 async def orders_view(call: CallbackQuery, state: FSMContext):
-    _, _, pid_str, punix_str = call.data.split(":")
-    pid, punix = int(pid_str), int(punix_str)
+    # orders:view:{pid}:{punix}  или orders:view:{pid}:{punix}:{page}
+    parts = call.data.split(":")
+    try:
+        _, _, pid_str, punix_str, *rest = parts
+        pid, punix = int(pid_str), int(punix_str)
+        data = await state.get_data()
+        page = int(rest[0]) if rest else int(data.get("orders_all_page", 0) or 0)
+    except Exception:
+        await call.answer("Ошибка данных.", show_alert=True)
+        return
 
     data = await state.get_data()
     rec = _find_by_pid_punix(data, pid, punix)
     if not rec:
-        await call.answer("Заказ не найден. Обновите список.", show_alert=True)
-        return
+        pos = Positionx.get(position_unix=punix)
+        if not pos:
+            await call.answer("Заказ не найден. Обновите список.", show_alert=True)
+            return
+        rec = _pos_to_dict(pos)  # твоя утилита в проекте
 
-    ext = _pos_ext(rec.get("position_desc", ""))
-    cats = Categoryx.get_all()
-    cat_map = {c.category_id: c.category_name for c in cats}
+    ext = _pos_ext(rec.get("position_desc", ""))  # твоя утилита в проекте
+
+    # Категории
+    cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
     cat_ids = ext.get("categories") or (
-        [rec.get("category_id")] if rec.get("category_id") is not None else []
+        [rec.get("category_id")] if rec.get("category_id") else []
     )
     cats_text = (
-        ", ".join([cat_map.get(cid, str(cid)) for cid in cat_ids]) if cat_ids else "—"
+        ", ".join([cats_map.get(cid, str(cid)) for cid in cat_ids]) if cat_ids else "—"
+    )
+    cats_text = html.escape(cats_text)
+
+    # Поля (экранируем)
+    city = html.escape(str(ext.get("city", "—")))
+    address = html.escape(str(ext.get("address", "—")))
+    dates = html.escape(str(ext.get("dates", "—")))
+    desc = html.escape(str(ext.get("raw_desc", "")))
+
+    price = int(rec.get("position_price", 0) or 0)
+    budget_text = _budget_text(price, ext.get("budget"))
+    photos = list(ext.get("photos", []) or [])[:5]
+
+    # Если есть фото — отправим медиа-группу
+    if photos:
+        media = [InputMediaPhoto(type="photo", media=fid) for fid in photos]
+        try:
+            await call.message.answer_media_group(media=media)
+        except Exception:
+            pass
+
+    txt = (
+        f"<b>Заказ</b>\n\n"
+        f"🏙 Город: <code>{city}</code>\n"
+        f"📍 Адрес: <code>{address}</code>\n"
+        f"🧰 Категории: <code>{cats_text}</code>\n"
+        f"💰 Бюджет: <code>{budget_text}</code>\n"
+        f"📅 Сроки: <code>{dates}</code>\n\n"
+        f"📝 Описание:\n{desc}"
     )
 
-    budget = rec.get("position_price", 0)
-    budget_text = f"{budget} руб." if budget else (ext.get("budget") or "договорная")
-    city = ext.get("city", "—")
-    address = ext.get("address", "—")
-    dates = ext.get("dates", "—")
-    desc = ext.get("raw_desc", "")
-
-    txt = ded(
-        f"""
-        <b>Заказ</b>
-
-        🏙 Город: <code>{city}</code>
-        📍 Адрес: <code>{address}</code>
-        🧰 Категории: <code>{cats_text}</code>
-        💰 Бюджет: <code>{budget_text}</code>
-        📅 Сроки: <code>{dates}</code>
-
-        📝 Описание:
-        {desc}
-    """
+    # Кнопки: «Согласиться» если свободен, «Назад», «Режимы»
+    is_free = (int(rec.get("worker_id", 0) or 0) == 0) and (
+        int(rec.get("position_status", 0) or 0) != 2
     )
 
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
+    rows = []
+    if is_free:
+        rows.append(
             [
                 InlineKeyboardButton(
-                    text="✅ Согласиться", callback_data=f"orders:respond:{pid}:{punix}"
+                    text="✅ Согласиться",
+                    callback_data=f"orders:respond:{pid}:{punix}:{page}",
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад к списку", callback_data="orders:back_to_list"
-                )
-            ],
+            ]
+        )
+    else:
+        rows.append(
+            [InlineKeyboardButton(text="⛔ Заказ недоступен", callback_data="noop")]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад к списку", callback_data=f"orders:all:page:{page}"
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="← Режимы просмотра", callback_data="orders:back_modes"
+            )
         ]
     )
 
-    await call.message.edit_text(txt, reply_markup=kb)
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    # Публикуем карточку (новым сообщением безопаснее, чтобы фото не терялись)
+    try:
+        await call.message.answer(txt, reply_markup=kb)
+    except Exception:
+        await call.message.edit_text(txt, reply_markup=kb)
+
     await state.set_state("orders_viewing")
     await call.answer()
+
+
+def _pos_get_time_legacy(pos) -> int:
+    return int(getattr(pos, "time", 0) or getattr(pos, "position_time", 0) or 0)
+
+
+def _update_position_by_unix(punix: int, **changes):
+    """
+    Обновляет ровно один заказ по position_unix.
+    Пробуем только безопасные вызовы: keyword-only / data=... / set / edit / instance.save().
+    НИКАКИХ позиционных аргументов.
+    """
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        raise RuntimeError("position not found")
+
+    # Считываем текущее состояние
+    fields = {}
+
+    # базовые поля (только то, что реально встречается в модели)
+    if hasattr(pos, "category_id"):
+        fields["category_id"] = int(getattr(pos, "category_id") or 0)
+    if hasattr(pos, "position_id"):
+        fields["position_id"] = int(getattr(pos, "position_id") or 0)  # id заказчика
+    if hasattr(pos, "position_name"):
+        fields["position_name"] = getattr(pos, "position_name", "") or ""
+    if hasattr(pos, "position_price"):
+        fields["position_price"] = int(getattr(pos, "position_price") or 0)
+    if hasattr(pos, "position_desc"):
+        fields["position_desc"] = getattr(pos, "position_desc", "") or ""
+    if hasattr(pos, "worker_id"):
+        fields["worker_id"] = int(getattr(pos, "worker_id") or 0)
+    if hasattr(pos, "position_status"):
+        fields["position_status"] = int(getattr(pos, "position_status") or 0)
+
+    # время — как есть, если поле существует (названия могут отличаться)
+    if hasattr(pos, "time"):
+        fields["time"] = int(getattr(pos, "time") or 0)
+    if hasattr(pos, "position_time"):
+        fields["position_time"] = int(getattr(pos, "position_time") or 0)
+
+    # применяем изменения
+    for k, v in changes.items():
+        fields[k] = v
+
+    last_err = None
+
+    # 1) update(...) keyword-only
+    if hasattr(Positionx, "update"):
+        try:
+            return Positionx.update(position_unix=punix, **fields)
+        except Exception as e:
+            last_err = e
+        # 1b) update(position_unix=..., data=fields)
+        try:
+            return Positionx.update(position_unix=punix, data=fields)
+        except Exception as e:
+            last_err = e
+
+    # 2) set(position_unix=..., data=fields)
+    if hasattr(Positionx, "set"):
+        try:
+            return Positionx.set(position_unix=punix, data=fields)
+        except Exception as e:
+            last_err = e
+
+    # 3) edit(...) keyword-only
+    if hasattr(Positionx, "edit"):
+        try:
+            return Positionx.edit(position_unix=punix, **fields)
+        except Exception as e:
+            last_err = e
+
+    # 4) Последний шанс: обновить инстанс и сохранить
+    try:
+        for k, v in fields.items():
+            # обновим только существующие атрибуты модели
+            if hasattr(pos, k):
+                setattr(pos, k, v)
+        if hasattr(pos, "update"):
+            try:
+                return pos.update()
+            except Exception as e:
+                last_err = e
+        if hasattr(pos, "save"):
+            return pos.save()
+        if hasattr(pos, "commit"):
+            return pos.commit()
+    except Exception as e:
+        last_err = e
+
+    raise last_err or RuntimeError("No suitable update method on Positionx")
+
+
+@router.callback_query(F.data.startswith("orders:respond:"))
+async def orders_respond(call: CallbackQuery, state: FSMContext, bot: Bot):
+    # orders:respond:{pid}:{punix}:{page}
+    try:
+        _, _, pid_str, punix_str, page_str = call.data.split(":")
+        punix = int(punix_str)
+        page = int(page_str)
+    except Exception:
+        await call.answer("Ошибка данных.", show_alert=True)
+        return
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await call.answer("Заказ не найден.", show_alert=True)
+        return
+    if (
+        int(getattr(pos, "worker_id", 0) or 0) != 0
+        or int(getattr(pos, "position_status", 0) or 0) == 2
+    ):
+        await call.answer("Этот заказ уже недоступен.", show_alert=True)
+        await _show_orders_all_page(call, page=page, state=state)
+        return
+
+    # Назначаем исполнителя и переводим в «в работе»
+    _update_position_by_unix(punix, worker_id=call.from_user.id, position_status=1)
+
+    # Уведомим заказчика
+    client_id = int(getattr(pos, "position_id", 0) or 0)
+    title = getattr(pos, "position_name", "Заказ")
+    worker_name = call.from_user.full_name or "Исполнитель"
+    note = (
+        "✅ <b>На ваш заказ откликнулись</b>\n\n"
+        f"📦 Заказ: <code>{html.escape(title)}</code>\n"
+        f'👤 Исполнитель: <a href="tg://user?id={call.from_user.id}">{html.escape(worker_name)}</a>\n\n'
+        "Свяжитесь с ним для уточнения деталей."
+    )
+    try:
+        await bot.send_message(client_id, note, disable_web_page_preview=True)
+    except Exception:
+        pass
+
+    await call.answer("Вы взяли заказ ✔️")
+    await _show_orders_all_page(call, page=page, state=state)
 
 
 @router.callback_query(StateFilter("orders_viewing"), F.data == "orders:back_to_list")
@@ -2436,6 +3158,9 @@ def _list_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+from aiogram.types import InlineKeyboardButton
+
+
 async def _show_myresp_tab(
     msg: Message,
     tab: str,
@@ -2450,7 +3175,7 @@ async def _show_myresp_tab(
         dataset = _collect_my_responses(worker_id)
         await state.update_data(myresp_data=dataset)
 
-    order_map = dataset["map"]
+    order_map = dataset.get("map", {}) or {}
     current_list = dataset.get("current", []) or []
     done_list = dataset.get("done", []) or []
 
@@ -2459,50 +3184,135 @@ async def _show_myresp_tab(
     total = len(source)
 
     # Нормализация пагинации
-    if per_page <= 0:
-        per_page = 6
+    per_page = per_page if per_page > 0 else 6
     last_page = max((total - 1) // per_page, 0)
     page = max(0, min(page, last_page))
 
     start = page * per_page
     items = source[start : start + per_page]
 
-    # Клава: передаём tot_cur и tot_done
+    # Генерим текущую клавиатуру (как раньше), НО снимаем первую строку-вкладки
     kb = _list_kb(
         tab, items, order_map, page, per_page, total, worker_id, total_cur, total_done
     )
-    # Первая строка клавиатуры — вкладки; обновим их счетчиками корректно
-    kb.inline_keyboard[0] = _tabs_kb(total_cur, total_done, tab)[0]
 
-    text = "<b>📋 Мои отклики</b>\nВыберите заказ:"
+    # если первой строкой идут вкладки — уберём её
+    if kb.inline_keyboard:
+        first_row = kb.inline_keyboard[0]
+        if all(
+            getattr(b, "callback_data", "")
+            and getattr(b, "callback_data").startswith("myresp:tab:")
+            for b in first_row
+        ):
+            kb.inline_keyboard.pop(0)
+
+    # добавим «шаг назад»
+    kb.inline_keyboard.append(
+        [
+            InlineKeyboardButton(
+                text="← К выбору типа", callback_data="myresp:back_modes"
+            )
+        ]
+    )
+
+    # Заголовок по выбранному типу
+    head = "🟢 Актуальные отклики" if tab == "current" else "✅ Завершённые отклики"
+    if total == 0:
+        text = f"<b>{head}</b>\nВ этом разделе пока пусто."
+        try:
+            await msg.edit_text(text, reply_markup=kb)
+        except Exception:
+            await msg.answer(text, reply_markup=kb)
+        await state.update_data(myresp_tab=tab, myresp_page=0, myresp_per_page=per_page)
+        return
+
+    text = f"<b>{head}</b>\nВыберите заказ:"
     try:
         await msg.edit_text(text, reply_markup=kb)
     except Exception:
         await msg.answer(text, reply_markup=kb)
 
-    # Запомним активную вкладку/страницу — чтобы «Назад к списку» работал
+    # Запомним активную вкладку/страницу
     await state.update_data(myresp_tab=tab, myresp_page=page, myresp_per_page=per_page)
 
 
 # ───────── entrypoint ─────────
 
 
+from aiogram import F
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    Message,
+)
+from aiogram.fsm.context import FSMContext
+
+
+def _myresp_mode_kb(total_cur: int = 0, total_done: int = 0) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🟢 Актуальные ({total_cur})",
+                    callback_data="myresp:mode:current",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"✅ Завершённые ({total_done})",
+                    callback_data="myresp:mode:done",
+                )
+            ],
+        ]
+    )
+
+
+# 1) Сначала стейт, потом сообщение
 @router.message(F.text == "📋 Мои отклики")
 async def my_responses_root(message: Message, state: FSMContext):
     await state.clear()
-    await _show_myresp_tab(
-        message, tab="current", page=0, state=state, worker_id=message.from_user.id
+    worker_id = message.from_user.id
+
+    dataset = _collect_my_responses(worker_id)
+    await state.update_data(myresp_data=dataset)
+
+    total_cur = len(dataset.get("current", []) or [])
+    total_done = len(dataset.get("done", []) or [])
+
+    # Сначала ставим стейт!
+    await state.set_state("myresp_mode")
+
+    await message.answer(
+        "<b>Что показать?</b>",
+        reply_markup=_myresp_mode_kb(total_cur, total_done),
     )
-    await state.set_state("myresp_list")
 
 
-# Переключение вкладок
-@router.callback_query(StateFilter("myresp_list"), F.data.startswith("myresp:tab:"))
-async def myresp_tab(call: CallbackQuery, state: FSMContext):
-    tab = call.data.split(":")[2]
+# 2) Режим: без StateFilter (чтобы не промахиваться при гонках стейта)
+@router.callback_query(F.data.startswith("myresp:mode:"))
+async def myresp_mode_pick(call: CallbackQuery, state: FSMContext):
+    tab = call.data.split(":")[-1]  # current | done
     await _show_myresp_tab(
         call.message, tab=tab, page=0, state=state, worker_id=call.from_user.id
     )
+    await state.set_state("myresp_list")
+    await call.answer()
+
+
+# 3) «Назад к выбору типа» — тоже без StateFilter
+@router.callback_query(F.data == "myresp:back_modes")
+async def myresp_back_modes(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    dataset = data.get("myresp_data") or {"current": [], "done": []}
+    total_cur = len(dataset.get("current", []) or [])
+    total_done = len(dataset.get("done", []) or [])
+
+    await call.message.edit_text(
+        "<b>Что показать?</b>",
+        reply_markup=_myresp_mode_kb(total_cur, total_done),
+    )
+    await state.set_state("myresp_mode")
     await call.answer()
 
 
@@ -2517,7 +3327,10 @@ async def myresp_page(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# Просмотр карточки отклика / заказа
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from typing import List
+
+
 @router.callback_query(StateFilter("myresp_list"), F.data.startswith("myresp:view:"))
 async def myresp_view(call: CallbackQuery, state: FSMContext):
     punix = int(call.data.split(":")[2])
@@ -2526,7 +3339,7 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
     mp = dataset.get("map", {})
     rec = mp.get(str(punix))
 
-    # Если в карте нет — попробуем подтянуть напрямую
+    # Если в карте нет — подтянем напрямую
     if not rec:
         pos = Positionx.get(position_unix=punix)
         if not pos:
@@ -2535,6 +3348,7 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
         rec = _pos_to_dict(pos)
 
     ext = _pos_ext(rec.get("position_desc", ""))
+
     cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
     cat_ids = ext.get("categories") or (
         [rec.get("category_id")] if rec.get("category_id") else []
@@ -2543,8 +3357,10 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
         ", ".join([cats_map.get(cid, str(cid)) for cid in cat_ids]) if cat_ids else "—"
     )
 
-    budget = rec.get("position_price", 0)
-    budget_text = f"{budget} руб." if budget else (ext.get("budget") or "договорная")
+    budget = int(rec.get("position_price", 0) or 0)
+    budget_text = (
+        f"{budget} руб." if budget > 0 else (ext.get("budget") or "договорная")
+    )
     city = ext.get("city", "—")
     address = ext.get("address", "—")
     dates = ext.get("dates", "—")
@@ -2565,14 +3381,27 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
     """
     )
 
-    # Кнопки
+    # Кнопки (без дублей)
     worker_id = call.from_user.id
-    assigned_id = rec.get("worker_id", 0) or 0
-    pid = rec.get("position_id", 0) or 0
+    assigned_id = int(rec.get("worker_id", 0) or 0)
+    pid = int(rec.get("position_id", 0) or 0)  # id заказчика
+    status = int(rec.get("position_status", 0) or 0)
+    assigned = assigned_id == worker_id
 
     buttons: List[List[InlineKeyboardButton]] = []
-    # Если назначен именно этот worker — дать кнопку связи с заказчиком
-    if assigned_id == worker_id:
+
+    # 1) «Сдать работу» — только если назначен и не завершён
+    if assigned and status != 2:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🚚 Сдать работу", callback_data=f"myresp:handoff:{punix}"
+                )
+            ]
+        )
+
+    # 2) Либо «Связаться», либо «Ожидает подтверждения»
+    if assigned:
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -2581,7 +3410,6 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
             ]
         )
     else:
-        # иначе — просто напомнить, что ожидает подтверждения
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -2590,7 +3418,7 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
             ]
         )
 
-    # Назад к списку (в текущую вкладку и страницу)
+    # 3) Назад к списку
     tab = data.get("myresp_tab", "current")
     page = int(data.get("myresp_page", 0))
     buttons.append(
@@ -2604,6 +3432,86 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await call.message.edit_text(txt, reply_markup=kb)
     await call.answer()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await call.message.edit_text(txt, reply_markup=kb)
+    await call.answer()
+
+
+from aiogram import Bot
+
+
+@router.callback_query(StateFilter("myresp_list"), F.data.startswith("myresp:handoff:"))
+async def myresp_handoff(call: CallbackQuery, state: FSMContext, bot: Bot):
+    try:
+        punix = int(call.data.split(":")[-1])
+    except Exception:
+        await call.answer("Ошибка данных", show_alert=True)
+        return
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await call.answer("Заказ не найден", show_alert=True)
+        return
+
+    # проверяем, что именно этот воркер назначен
+    worker_id = call.from_user.id
+    if int(getattr(pos, "worker_id", 0) or 0) != worker_id:
+        await call.answer("Вы не назначены на этот заказ.", show_alert=True)
+        return
+
+    client_id = int(
+        getattr(pos, "position_id", 0) or 0
+    )  # у вас position_id = id заказчика
+    name = getattr(pos, "position_name", "Заказ")
+    worker_mention = call.from_user.full_name or "Исполнитель"
+
+    notify = ded(
+        f"""
+        ✅ <b>Исполнитель сообщил о завершении работы</b>
+
+        📦 Заказ: <code>{name}</code>
+        👤 Исполнитель: <a href="tg://user?id={worker_id}">{worker_mention}</a>
+
+        Проверьте результат и подтвердите завершение в разделе «💡 Мои заказы».
+    """
+    )
+
+    sent_ok = True
+    try:
+        await bot.send_message(client_id, notify, disable_web_page_preview=True)
+    except Exception:
+        sent_ok = False
+
+    # ответ исполнителю
+    if sent_ok:
+        await call.answer("Уведомили заказчика ✔️", show_alert=False)
+        # можно визуально отметить в карточке:
+        try:
+            await call.message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="📨 Уведомление отправлено", callback_data="noop"
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="⬅️ Назад к списку",
+                                callback_data=f"myresp:page:{(await state.get_data()).get('myresp_tab','current')}:{int((await state.get_data()).get('myresp_page',0))}",
+                            )
+                        ],
+                    ]
+                )
+            )
+        except Exception:
+            pass
+    else:
+        await call.answer(
+            "Не удалось отправить уведомление заказчику (он мог не запускать бота).",
+            show_alert=True,
+        )
 
 
 @router.message(StateFilter("orders_resp_offer"))
@@ -2752,11 +3660,6 @@ async def my_orders_root(message: Message, state: FSM):
 
     await _show_my_orders_page(message, page=0, state=state)
     await state.set_state("my_orders_list")
-    # ДОБАВЛЯЕМ отдельной строкой кнопку «Все категории»
-    # await message.answer(
-    #    "Или посмотреть сразу все ваши заказы:",
-    #    reply_markup=client_myorders_all_button_kb(user_id),
-    # )
 
 
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -2939,14 +3842,77 @@ async def _show_my_orders_page(
         await msg_or_call_message.answer("<b>📁 Ваши заказы:</b>", reply_markup=kb)
 
 
-# ◀️▶️ пагинация списка
-@router.callback_query(
-    StateFilter("my_orders_list"), F.data.startswith("myorders:list_page:")
-)
-async def my_orders_page(call: CallbackQuery, state: FSM):
-    page = int(call.data.split(":")[2])
+from aiogram import F
+from aiogram.types import CallbackQuery
+from aiogram.fsm.context import FSMContext
+import json
+
+
+@router.callback_query(StateFilter("my_orders_list"), F.data.startswith("myord:del:"))
+async def my_order_delete(call: CallbackQuery, state: FSMContext):
+    # data format: myord:del:{position_unix}
+    punix_str = call.data.split(":")[-1]
+    try:
+        punix = int(punix_str)
+    except Exception:
+        await call.answer("Некорректный идентификатор заказа.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    my_list = data.get("my_orders_list") or []
+    mp_json = data.get("my_orders_map") or "{}"
+    try:
+        mp = json.loads(mp_json)
+    except Exception:
+        mp = {}
+
+    item = mp.get(str(punix))
+    if not item:
+        await call.answer("Заказ не найден в списке.", show_alert=True)
+        return
+
+    # Доп. проверка: что заказ принадлежит пользователю
+    if int(item.get("position_id", 0) or 0) != call.from_user.id:
+        await call.answer("Это не ваш заказ.", show_alert=True)
+        return
+
+    # ❗️ КЛЮЧЕВОЕ: удаляем ТОЛЬКО по position_unix
+    try:
+        # Вариант 1: если есть именно такой метод
+        ok = Positionx.delete(position_unix=punix)
+    except AttributeError:
+        # Вариант 2: если у тебя метод называется remove()
+        ok = Positionx.remove(position_unix=punix)
+    except Exception as e:
+        await call.answer(f"Ошибка удаления: {e}", show_alert=True)
+        return
+
+    # Обновляем state локально, чтобы не перечитывать БД заново
+    if punix in my_list:
+        my_list = [k for k in my_list if k != punix]
+    if str(punix) in mp:
+        mp.pop(str(punix), None)
+
+    await state.update_data(
+        my_orders_list=my_list,
+        my_orders_map=json.dumps(mp, ensure_ascii=False),
+    )
+
+    # Если ничего не осталось — сообщаем и сбрасываем стейт
+    if not my_list:
+        await call.message.edit_text("<b>❌ У вас пока нет заказов.</b>")
+        await state.clear()
+        await call.answer()
+        return
+
+    # Иначе — перерисовываем текущую страницу корректно
+    page = int(data.get("my_orders_page", 0) or 0)
+    per_page = int(data.get("my_orders_per_page", 6) or 6)
+    last_page = max((len(my_list) - 1) // per_page, 0)
+    page = min(page, last_page)
+
     await _show_my_orders_page(call.message, page=page, state=state)
-    await call.answer()
+    await call.answer("Заказ удалён.")
 
 
 # 👁 открыть заказ (карточка) — переиспользуем твой position_open_admin
@@ -3013,20 +3979,52 @@ async def prod_position_edit_open(
     await position_open_admin(bot, call.from_user.id, position_id, position_unix)
 
 
-# Выбор позиции для редактирования
+from aiogram import F
+from aiogram.types import CallbackQuery
+
+
 @router.callback_query(F.data.startswith("position_edit_open:"))
-async def prod_position_edit_open(
-    call: CallbackQuery, bot: Bot, state: FSM, arSession: ARS
-):
-    position_id = call.data.split(":")[2]
-    category_id = call.data.split(":")[3]
-    remover = int(call.data.split(":")[4])
-    position_unix = call.data.split(":")[1]
+async def prod_position_edit_open(call: CallbackQuery, state: FSMContext):
+    # Поддерживаем оба варианта:
+    # 1) position_edit_open:{position_id}:{category_id}:{remover}
+    # 2) position_edit_open:{position_id}:{category_id}:{remover}:{position_unix}
+    parts = call.data.split(":")
+    if len(parts) < 4:
+        await call.answer("Ошибка данных (формат callback).", show_alert=True)
+        return
 
-    await state.clear()
+    try:
+        _, pos_id_s, cat_id_s, remover_s, *tail = parts
+        position_id = int(pos_id_s)
+        category_id = int(cat_id_s)
+        # remover бывает строкой — не насилуем в int без нужды
+        remover = remover_s
+        position_unix = int(tail[0]) if tail and tail[0].isdigit() else 0
+    except Exception:
+        await call.answer("Ошибка данных (парсинг).", show_alert=True)
+        return
 
-    await del_message(call.message)
-    await position_open_admin(bot, call.from_user.id, position_id, position_unix)
+    # Если punix не пришёл (старые кнопки) — можно попробовать подтянуть его,
+    # но это опционально. Безопасный вариант: оставляем 0.
+    # pos = Positionx.get(position_id=position_id)  # ⚠️ Если это id клиента — может быть несколько заказов.
+    # position_unix = getattr(pos, "position_unix", 0) if pos and not position_unix else position_unix
+
+    # Рисуем меню редактирования (твоя функция уже ожидает punix)
+    try:
+        await call.message.edit_text(
+            "<b>Изменение заказа</b>",
+            reply_markup=position_edit_open_finl(
+                position_id, category_id, remover, position_unix
+            ),
+        )
+    except Exception:
+        await call.message.answer(
+            "<b>Изменение заказа</b>",
+            reply_markup=position_edit_open_finl(
+                position_id, category_id, remover, position_unix
+            ),
+        )
+    await call.answer()
 
 
 # Выбор позиции для редактирования
@@ -3222,7 +4220,6 @@ async def start_order(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("<b>🏙 Выберите город:</b>", reply_markup=cities_swipe(0))
     await state.set_state("order_city")
-
 
 
 # пагинация городов
@@ -3541,20 +4538,6 @@ async def photos_skip(cq: CallbackQuery, state: FSMContext):
     await proceed_to_next_step(state, cq)
 
 
-# ────────────────────────── Клавиатура подтверждения ──────────────────────────
-def confirm_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Подтвердить", callback_data="order:confirm"
-                )
-            ],
-            [InlineKeyboardButton(text="✏️ Изменить", callback_data="order:edit")],
-        ]
-    )
-
-
 # ────────────────────────── Комментарий → Подтверждение ──────────────────────────
 @router.message(StateFilter("order_comment"))
 async def get_comment(message: Message, state: FSMContext):
@@ -3567,52 +4550,6 @@ async def get_comment(message: Message, state: FSMContext):
     # показать подтверждение
     await _show_confirmation(message, state)
     await state.set_state("order_confirm")
-
-
-# ────────────────────────── Подтверждение ──────────────────────────
-async def _show_confirmation(msg: Message, state: FSMContext):
-    data = await state.get_data()
-
-    # Безопасные значения + экранирование для HTML
-    city = html.escape(str(data.get("city", "—")))
-    address = html.escape(str(data.get("address", "—")))
-    desc = html.escape(str(data.get("desc", "—")))
-    budget = data.get("budget", "договорная")
-    dates = html.escape(str(data.get("dates", "пока не определился")))
-    photos = list(data.get("photos", []))
-    cats_ids = list(data.get("cats", []))
-    comment = html.escape(str(data.get("comment", "")))
-
-    # Формат бюджета: число с пробелами
-    if isinstance(budget, int):
-        budget_text = f"{budget:,}".replace(",", " ") + " руб."
-    else:
-        budget_text = html.escape(str(budget))
-
-    # Категории
-    cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
-    cats_titles = [cats_map.get(cid, str(cid)) for cid in cats_ids]
-    cats_text = html.escape(", ".join(cats_titles)) if cats_titles else "—"
-
-    # Если есть фото — отправим как media group (без подписи),
-    # а затем отдельным сообщением — текст с кнопками.
-    if photos:
-        media = [InputMediaPhoto(type="photo", media=file_id) for file_id in photos[:5]]
-        await msg.answer_media_group(media=media)
-
-    # Текст подтверждения
-    txt = (
-        f"<b>Проверьте заказ:</b>\n\n"
-        f"🏙 Город: <code>{city}</code>\n"
-        f"📍 Адрес: <code>{address}</code>\n"
-        f"🧰 Категории: <code>{cats_text}</code>\n\n"
-        f"📝 Описание:\n{desc}\n\n"
-        f"💰 Бюджет: <code>{budget_text}</code>\n"
-        f"📅 Сроки: <code>{dates}</code>\n"
-        f"🖼 Фото: <code>{len(photos)} шт.</code>\n"
-        f"💬 Комментарий: {comment if comment else '—'}"
-    )
-    await msg.answer(txt, reply_markup=confirm_kb())
 
 
 # ────────────────────────── Обработка «Подтвердить / Изменить» ──────────────────────────
@@ -3633,65 +4570,6 @@ async def confirm_edit(call: CallbackQuery, state: FSMContext):
         "Введите новое ОПИСАНИЕ задачи:", reply_markup=cancel_order_button()
     )
     await state.set_state("order_desc")
-    await call.answer()
-
-
-@router.callback_query(StateFilter("order_confirm"), F.data == "order:confirm")
-async def confirm_ok(call: CallbackQuery, state: FSMContext, bot: Bot):
-    data = await state.get_data()
-    city = data["city"]
-    address = data["address"]
-    desc = data["desc"]
-    budget = data.get("budget", "договорная")
-    dates = data.get("dates", "пока не определился")
-    photos = data.get("photos", [])
-    cats_ids = data.get("cats", [])
-
-    main_cat_id = cats_ids[0] if cats_ids else 0
-    position_name = (desc[:50] + "…") if len(desc) > 53 else desc
-
-    ext = {
-        "city": city,
-        "address": address,
-        "categories": cats_ids,
-        "budget": budget,
-        "dates": dates,
-        "photos": photos,
-        "raw_desc": desc,
-    }
-    position_desc = "[ORDER]\n" + json.dumps(ext, ensure_ascii=False, indent=2)
-    price_val = budget if isinstance(budget, int) else 0
-
-    Positionx.add(
-        main_cat_id,  # category_id
-        call.from_user.id,  # position_id → автоинкремент
-        position_name,
-        price_val,
-        position_desc,
-        0,  # time legacy
-        0,  # worker_id (используем для владельца)
-        0,  # st atus
-    )
-
-    await state.clear()
-
-    cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
-    cats_titles = [cats_map.get(cid, str(cid)) for cid in cats_ids]
-    cats_text = ", ".join(cats_titles) if cats_titles else "—"
-    budget_text = f"{budget} руб." if isinstance(budget, int) else str(budget)
-
-    await call.message.answer(
-        ded(
-            f"""
-        ✅ <b>Ваш заказ создан!</b>
-        Категория: [{cats_text}]
-        Описание: [{desc}]
-        Адрес: [{address}]
-        Бюджет: [{budget_text}]
-        Сроки: [{dates}]
-    """
-        )
-    )
     await call.answer()
 
 

@@ -381,8 +381,7 @@ async def prod_position_add_desc_get(
             position_desc = "None"
     except:
         return await message.answer(
-            "<b>❌ Ошибка синтаксиса HTML.</b>\n"
-            "📁 Введите описание для позиции\n",
+            "<b>❌ Ошибка синтаксиса HTML.</b>\n" "📁 Введите описание для позиции\n",
             reply_markup=cancel_order_button(),
         )
 
@@ -747,16 +746,63 @@ async def prod_position_edit_items(
 async def prod_position_edit_delete(
     call: CallbackQuery, bot: Bot, state: FSM, arSession: ARS
 ):
-    position_id = call.data.split(":")[1]
-    category_id = call.data.split(":")[2]
-    remover = int(call.data.split(":")[3])
-
+    _, position_id, category_id, remover, punix = call.data.split(":")
+    remover = int(remover)
+    # показываем подтверждение
     await del_message(call.message)
-
     await call.message.answer(
         "<b>📁 Вы действительно хотите удалить заказ? ❌</b>",
-        reply_markup=position_edit_delete_finl(position_id, category_id, remover),
+        reply_markup=position_edit_delete_finl_confirm(
+            position_id, category_id, remover, punix
+        ),
     )
+
+
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+def position_edit_delete_finl_confirm(
+    position_id, category_id, remover, position_unix
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.row(
+        ikb(
+            "✅ Да, удалить",
+            data=f"position_edit_delete_confirm:{position_id}:{category_id}:{remover}:{position_unix}",
+        ),
+        ikb(
+            "❌ Нет, отменить",
+            data=f"position_edit_open:{position_id}:{category_id}:{remover}",
+        ),
+    )
+    return kb.as_markup()
+
+
+@router.callback_query(F.data.startswith("position_edit_delete_confirm:"))
+async def prod_position_edit_delete_confirm(
+    call: CallbackQuery, bot: Bot, state: FSM, arSession: ARS
+):
+    _, position_id, category_id, remover, punix = call.data.split(":")
+    remover = int(remover)
+    punix = int(punix)
+
+    # Удаляем конкретный заказ по position_unix
+    Positionx.delete(position_unix=punix)
+
+    # Если у тебя в Itemx связка тоже через position_unix — удали по нему:
+    # Itemx.delete(position_unix=punix)
+    # (НИ В КОЕМ СЛУЧАЕ не удаляй Itemx по position_id, иначе удалишь всё владельца)
+
+    await call.answer("📁 Заказ удалён ✅")
+
+    # Обновляем список/меню
+    if len(Positionx.gets(category_id=category_id)) >= 1:
+        await call.message.edit_text(
+            "<b>📁 Выберите заказы для изменения 🖍</b>",
+            reply_markup=position_edit_swipe_fp(remover, category_id, call),
+        )
+    else:
+        await del_message(call.message)
 
 
 # Удаление позиции
@@ -773,7 +819,9 @@ async def prod_position_edit_delete(
 
     await call.message.answer(
         "<b>📁 Вы действительно хотите подтвердить заказ? ✔️</b>",
-        reply_markup=position_edit_done_finl(position_id, category_id, remover, position_unix),
+        reply_markup=position_edit_done_finl(
+            position_id, category_id, remover, position_unix
+        ),
     )
 
 
@@ -794,7 +842,10 @@ async def prod_position_edit_delete(
         position_id,  # Указание ID пользователя
         text=(
             f"<b>📁 Исполнитель отправил вам на проверку заказ: <u>{name}</u></b>\n\n"
-        ),reply_markup = position_edit_open_finl_dindon(position_id, category_id, remover, position_unix)
+        ),
+        reply_markup=position_edit_open_finl_dindon(
+            position_id, category_id, remover, position_unix
+        ),
     )
 
     # Информирование отправителя, что сообщение отправлено
@@ -1117,7 +1168,7 @@ async def prod_item_add_finish(
     await call.message.answer(
         "<b>📥 Загрузка заказов была успешно завершена ✅\n"
         f"🔎 Загружено заказов: <code>{count_items}шт</code></b>",
-    )   
+    )
 
     get_position = Positionx.get(position_id=position_id)
     position_unix = get_position.position_unix

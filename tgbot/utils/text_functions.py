@@ -421,30 +421,108 @@ async def view_photos(call: CallbackQuery):
     await call.answer()
 
 
+from aiogram import F
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder as IKB
+from tgbot.database.db_users import Clientx
+from tgbot.database.db_settings import Settingsx
+from tgbot.keyboards.inline_user import user_support_finl
+from tgbot.utils.const_functions import ikb, ded, get_unix, convert_date
+
+
+def _client_sub_kb(active: bool) -> InlineKeyboardMarkup:
+    kb = IKB()
+    if active:
+        kb.row(ikb("ℹ️ Что включено", data="sub:info"))
+    else:
+        kb.row(ikb("💳 Оплатить (написать администратору)", data="sub:pay"))
+        kb.row(ikb("ℹ️ Что включено", data="sub:info"))
+    kb.row(ikb("← В профиль", data="client:profile:back"))
+    return kb.as_markup()
+
+
+@router.callback_query(F.data == "client:subscription")
+async def client_subscription(call: CallbackQuery):
+    c = Clientx.get(client_id=call.from_user.id)
+    if not c:
+        await call.answer("Профиль не найден.", show_alert=True)
+        return
+
+    now = get_unix()
+    paid_until = int(getattr(c, "sub_paid_until", 0) or 0)
+    is_trial = bool(int(getattr(c, "sub_is_trial", 0) or 0))
+    active = paid_until > now
+
+    if active:
+        txt = ded(
+            f"""
+            <b>Подписка активна</b>
+            Действует до: <code>{convert_date(paid_until, False, False)}</code>
+            Режим: <code>{'бесплатный месяц' if is_trial else 'платная'}</code>
+        """
+        )
+    else:
+        txt = ded(
+            """
+            <b>Подписка неактивна</b>
+            Первый месяц — <b>бесплатно</b>.
+            Далее — <b>100 ₽ в неделю</b>.
+        """
+        )
+
+    await call.message.edit_text(txt, reply_markup=_client_sub_kb(active))
+    await call.answer()
+
+
+@router.callback_query(F.data == "client:profile:back")
+async def client_profile_back(call: CallbackQuery):
+    await call.answer()
+    await open_profile_client(call.bot, call.from_user.id)
+
+
+@router.callback_query(F.data == "sub:info")
+async def sub_info(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer(
+        "Подписка открывает возможность создавать заказы.\n"
+        "Первый месяц — бесплатно, затем 100 ₽ в неделю.\n"
+        "Оплата производится через администратора."
+    )
+
+
+@router.callback_query(F.data == "sub:pay")
+async def sub_pay(call: CallbackQuery):
+    await call.answer()
+    settings = Settingsx.get()
+    await call.message.answer(
+        "<b>☎️ Нажмите кнопку ниже для связи с Администратором для оплаты.</b>",
+        reply_markup=user_support_finl(settings.misc_support),
+    )
+
+
+from tgbot.utils.const_functions import ikb  # если ещё не импортирован
+
+
 # Открытие профиля клиентом
 async def open_profile_client(bot: Bot, user_id: Union[int, str]):
     get_purchases = Purchasesclientx.gets(client_id=user_id)
     get_client = Clientx.get(client_id=user_id)
 
     how_days = int(get_unix() - get_client.client_unix) // 60 // 60 // 24
-    #!count_items = sum([purchase.purchase_count for purchase in get_purchases])
-    #!🧑🏻‍💻 Дано заказов: <code>{count_items}шт</code>
     send_text = ded(
         f"""
         <b>👤 Ваш профиль:</b>
         ➖➖➖➖➖➖➖➖➖➖
         🆔 <code>{get_client.client_rlname}</code> <code>{get_client.client_surname}</code>
-        💰 Баланс: <code>{get_client.client_balance}₽</code>
 
         🕰 Регистрация: <code>{convert_date(get_client.client_unix, False, False)} ({convert_day(how_days)})</code>
     """
     )
 
-    await bot.send_message(
-        chat_id=user_id,
-        text=send_text,
-        reply_markup=client_profile_finl(),
-    )
+    kb = client_profile_finl()
+
+
+    await bot.send_message(chat_id=user_id, text=send_text, reply_markup=kb)
 
 
 # Открытие позиции пользователем
@@ -681,7 +759,6 @@ async def category_open_admin(
     )
 
 
-
 # Открытие позиции админом (и не только)
 async def position_open_admin(
     bot: Bot, user_id: int, position_id: Union[str, int], position_unix
@@ -720,13 +797,29 @@ async def position_open_admin(
 
     # Категории
     if ext:
-        cats_ids = ext.get("categories") or ([get_position.category_id] if getattr(get_position, "category_id", None) else [])
+        cats_ids = ext.get("categories") or (
+            [get_position.category_id]
+            if getattr(get_position, "category_id", None)
+            else []
+        )
     else:
-        cats_ids = [get_position.category_id] if getattr(get_position, "category_id", None) else []
-    cats_text = ", ".join([cats_map.get(cid, str(cid)) for cid in cats_ids]) if cats_ids else (get_category.category_name if get_category else "—")
+        cats_ids = (
+            [get_position.category_id]
+            if getattr(get_position, "category_id", None)
+            else []
+        )
+    cats_text = (
+        ", ".join([cats_map.get(cid, str(cid)) for cid in cats_ids])
+        if cats_ids
+        else (get_category.category_name if get_category else "—")
+    )
 
     # Бюджет
-    budget_val = get_position.position_price if getattr(get_position, "position_price", 0) else ext.get("budget") if ext else None
+    budget_val = (
+        get_position.position_price
+        if getattr(get_position, "position_price", 0)
+        else ext.get("budget") if ext else None
+    )
     if isinstance(budget_val, (int, float)):
         budget_text = f"{int(budget_val)}₽"
     else:
@@ -737,10 +830,13 @@ async def position_open_admin(
     address = ext.get("address", "—") if ext else "—"
     dates = ext.get("dates", "—") if ext else "—"
     time_hours = getattr(get_position, "position_time", 0) or 0
-    desc_text = (ext.get("raw_desc") if ext else None) or (get_position.position_name or "—")
+    desc_text = (ext.get("raw_desc") if ext else None) or (
+        get_position.position_name or "—"
+    )
 
     # Формируем красивый текст
-    send_text = ded(f"""
+    send_text = ded(
+        f"""
         <b>📁 Редактирование заказа</b>
         ➖➖➖➖➖➖➖➖➖➖
         ▪️ Заказ: <code>{desc_text}</code>
@@ -750,7 +846,8 @@ async def position_open_admin(
         ▪️ Дата создания: <code>{convert_date(get_position.position_unix, False, False)}</code>
         ▪️ Сроки: <code>{dates}</code>
         ▪️ Норматив (часы): <code>{time_hours}</code>
-    """)
+    """
+    )
 
     await bot.send_message(
         chat_id=user_id,

@@ -72,6 +72,7 @@ async def send_admins(bot: Bot, text: str, keyboard=None, not_me=0):
             ...
 
 
+
 # Уведомление об ошибке
 async def send_errors(bot: Bot, error_code: int):
     text_error = f"myError: {error_code}"
