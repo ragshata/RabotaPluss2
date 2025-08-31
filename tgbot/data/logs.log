@@ -1,5 +1,0 @@
-WARNING | 2025-08-31 23:46:23,367 | main.py:87 | BOT WAS STARTED
-ERROR | 2025-08-31 23:46:28,788 | dispatcher.py:219 | Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
-WARNING | 2025-08-31 23:46:28,789 | dispatcher.py:221 | Sleep for 1.000000 seconds and try again... (tryings = 0, bot id = 7908001459)
-ERROR | 2025-08-31 23:46:34,101 | dispatcher.py:219 | Failed to fetch updates - TelegramConflictError: Telegram server says - Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
-WARNING | 2025-08-31 23:46:34,101 | dispatcher.py:221 | Sleep for 1.240883 seconds and try again... (tryings = 1, bot id = 7908001459)
