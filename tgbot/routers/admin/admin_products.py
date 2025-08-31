@@ -566,7 +566,7 @@ async def prod_position_edit_name_get(
     await state.clear()
     get_position = Positionx.get(position_id=position_id)
     position_unix = get_position.position_unix
-    Positionx.update(position_id, position_name=clear_html(message.text))
+    Positionx.update_unix(position_id, position_name=clear_html(message.text))
     await position_open_admin(bot, message.from_user.id, position_id, position_unix)
 
 
@@ -619,7 +619,7 @@ async def prod_position_edit_price_get(
     await state.clear()
     get_position = Positionx.get(position_id=position_id)
     position_unix = get_position.position_unix
-    Positionx.update(position_id, position_price=to_number(message.text))
+    Positionx.update_unix(position_id, position_price=to_number(message.text))
     await position_open_admin(bot, message.from_user.id, position_id, position_unix)
 
 
@@ -682,7 +682,7 @@ async def prod_position_edit_desc_get(
     await state.clear()
     get_position = Positionx.get(position_id=position_id)
     position_unix = get_position.position_unix
-    Positionx.update(position_id, position_desc=position_desc)
+    Positionx.update_unix(position_id, position_desc=position_desc)
     await position_open_admin(bot, message.from_user.id, position_id, position_unix)
 
 

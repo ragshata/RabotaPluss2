@@ -338,8 +338,11 @@ async def sub_pay(call: CallbackQuery):
         "<b>☎️ Нажмите кнопку ниже для связи с Администратором для оплаты.</b>",
         reply_markup=user_support_finl(settings.misc_support),
     )
+
+
 import time
 from datetime import datetime
+
 
 def _to_int_unix(v) -> int:
     """
@@ -377,7 +380,7 @@ def get_client_sub_active_until(client) -> int:
     (берём максимум из trial и paid), не глядя на текст статуса.
     """
     trial_u = _to_int_unix(getattr(client, "sub_trial_until", 0))
-    paid_u  = _to_int_unix(getattr(client, "sub_paid_until", 0))
+    paid_u = _to_int_unix(getattr(client, "sub_paid_until", 0))
     return max(trial_u, paid_u)
 
 
@@ -389,6 +392,7 @@ from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 
 from tgbot.database.db_users import Clientx
+
 
 @router.message(F.text.in_(("➕ Создать заказ",)))
 async def start_order(message: Message, state: FSMContext):
@@ -821,20 +825,30 @@ async def confirm_edit(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
+from aiogram import F
+from aiogram.types import CallbackQuery, InputMediaPhoto
+from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter
+from aiogram import Bot
+import html, json
+
+
 @router.callback_query(StateFilter("order_confirm"), F.data == "order:confirm")
 async def confirm_ok(call: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
-    city = data["city"]
-    address = data["address"]
-    desc = data["desc"]
+
+    city = str(data.get("city", "—"))
+    address = str(data.get("address", "—"))
+    desc = str(data.get("desc", "")).strip()
     budget = data.get("budget", "договорная")
     dates = data.get("dates", "пока не определился")
-    photos = data.get("photos", [])
-    cats_ids = data.get("cats", [])
+    photos = list(data.get("photos", []) or [])
+    cats_ids = list(data.get("cats", []) or [])
 
     main_cat_id = cats_ids[0] if cats_ids else 0
     position_name = (desc[:50] + "…") if len(desc) > 53 else desc
 
+    # расширенное описание для дальнейшей фильтрации/поиска
     ext = {
         "city": city,
         "address": address,
@@ -845,38 +859,59 @@ async def confirm_ok(call: CallbackQuery, state: FSMContext, bot: Bot):
         "raw_desc": desc,
     }
     position_desc = "[ORDER]\n" + json.dumps(ext, ensure_ascii=False, indent=2)
-    price_val = budget if isinstance(budget, int) else 0
 
-    Positionx.add(
+    # бюджет в числовое поле — только если это число
+    price_val = int(budget) if isinstance(budget, int) else 0
+
+    # сохраняем и получаем уникальный идентификатор заказа (punix)
+    punix = Positionx.add(
         main_cat_id,  # category_id
-        call.from_user.id,  # position_id → автоинкремент
+        call.from_user.id,  # position_id (владелец заявки)
         position_name,
-        price_val,
+        float(price_val),  # position_price
         position_desc,
-        0,  # time legacy
-        0,  # worker_id (используем для владельца)
-        0,  # st atus
+        0.0,  # position_time (legacy)
+        0,  # worker_id (ещё не назначен)
+        0,  # position_status (актуален)
     )
 
+    # дальше только показ пользователю — состояние можно очистить
     await state.clear()
 
+    # красивые подписи категорий
     cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
     cats_titles = [cats_map.get(cid, str(cid)) for cid in cats_ids]
     cats_text = ", ".join(cats_titles) if cats_titles else "—"
-    budget_text = f"{budget} руб." if isinstance(budget, int) else str(budget)
 
-    await call.message.answer(
-        ded(
-            f"""
-        ✅ <b>Ваш заказ создан!</b>
-        Категория: [{cats_text}]
-        Описание: [{desc}]
-        Адрес: [{address}]
-        Бюджет: [{budget_text}]
-        Сроки: [{dates}]
-    """
-        )
+    # бюджет красивым текстом
+    budget_text = (
+        f"{price_val:,}".replace(",", " ") + " ₽" if price_val > 0 else str(budget)
     )
+
+    # если есть фото — отправим как медиагруппу (без подписи)
+    if photos:
+        media = [InputMediaPhoto(type="photo", media=fid) for fid in photos[:5]]
+        try:
+            await call.message.answer_media_group(media=media)
+        except Exception:
+            # если по какой-то причине не отправилось — просто продолжаем
+            pass
+
+    # финальный, «украшенный» текст
+    txt = (
+        f"✅ <b>Ваш заказ создан!</b>\n"
+        f"───────────────\n"
+        f"🆔 Номер: <code>{punix}</code>\n"
+        f"🏙 Город: <code>{html.escape(city)}</code>\n"
+        f"📍 Адрес: <code>{html.escape(address)}</code>\n"
+        f"🧰 Категории: <code>{html.escape(cats_text)}</code>\n"
+        f"💰 Бюджет: <code>{html.escape(budget_text)}</code>\n"
+        f"📅 Сроки: <code>{html.escape(str(dates))}</code>\n"
+        f"🖼 Фото: <code>{len(photos)} шт.</code>\n\n"
+        f"📝 <b>Описание</b>:\n{html.escape(desc) if desc else '—'}"
+    )
+
+    await call.message.answer(txt)
     await call.answer()
 
 
@@ -1329,6 +1364,9 @@ async def myresp_page(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
 @router.callback_query(StateFilter("myresp_list"), F.data.startswith("myresp:view:"))
 async def myresp_view(call: CallbackQuery, state: FSMContext):
     punix = int(call.data.split(":")[2])
@@ -1336,6 +1374,7 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
     dataset = data.get("myresp_data") or {}
     rec = (dataset.get("map") or {}).get(str(punix))
 
+    # подстрахуемся: подтянем напрямую
     if not rec:
         pos = Positionx.get(position_unix=punix)
         if not pos:
@@ -1352,8 +1391,10 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
         ", ".join([cats_map.get(cid, str(cid)) for cid in cat_ids]) if cat_ids else "—"
     )
 
-    budget = rec.get("position_price", 0)
-    budget_text = f"{budget} руб." if budget else (ext.get("budget") or "договорная")
+    budget = int(rec.get("position_price", 0) or 0)
+    budget_text = (
+        f"{budget} руб." if budget > 0 else (ext.get("budget") or "договорная")
+    )
     city = ext.get("city", "—")
     address = ext.get("address", "—")
     dates = ext.get("dates", "—")
@@ -1374,12 +1415,26 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
     """
     )
 
-    wid = call.from_user.id
-    assigned = rec.get("worker_id", 0) or 0
-    pid = rec.get("position_id", 0) or 0
+    worker_id = call.from_user.id
+    assigned_id = int(rec.get("worker_id", 0) or 0)
+    pid = int(rec.get("position_id", 0) or 0)  # ID заказчика
+    status = int(rec.get("position_status", 0) or 0)  # 0=свободен,1=в работе,2=завершён
+    assigned = assigned_id == worker_id
 
-    buttons = []
-    if assigned == wid:
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    # 1) «Сдать работу» — только если назначен и не завершён
+    if assigned and status != 2:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🚚 Сдать работу", callback_data=f"myresp:handoff:{punix}"
+                )
+            ]
+        )
+
+    # 2) либо «Связаться», либо «Ожидает подтверждения»
+    if assigned:
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -1396,6 +1451,7 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
             ]
         )
 
+    # 3) Назад к списку
     tab = data.get("myresp_tab", "current")
     page = int(data.get("myresp_page", 0))
     buttons.append(
@@ -1711,7 +1767,7 @@ def _orders_mode_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📄 Все заказы", callback_data="orders:mode_all"
+                    text="📄 ЗАказы из других городов", callback_data="orders:mode_all"
                 )
             ],
             [
@@ -1723,47 +1779,81 @@ def _orders_mode_kb() -> InlineKeyboardMarkup:
     )
 
 
-def _orders_all_kb(slice_keys, mp, page, per_page, total) -> InlineKeyboardMarkup:
+# helpers для парсинга ext и компактного текста кнопки
+import json
+
+
+def _ext_from_desc(desc: str) -> dict:
+    if not desc:
+        return {}
+    s = str(desc)
+    if s.startswith("[ORDER]"):
+        try:
+            _, js = s.split("\n", 1)
+            return json.loads(js)
+        except Exception:
+            return {}
+    return {}
+
+
+def _trim_btn(text: str, limit: int = 64) -> str:
+    # Telegram ограничивает длину подписи кнопки (~64 символа)
+    if len(text) <= limit:
+        return text
+    # максимально режем название заказа, остальное оставляем
+    return text[: limit - 1] + "…"
+
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
+def _orders_all_kb(
+    slice_keys, mp, page: int, per_page: int, total: int
+) -> InlineKeyboardMarkup:
     rows = []
-    # строки заказов
-    for k in slice_keys:
-        rec = mp.get(str(k), {})
-        name = rec.get("position_name", "") or "Без названия"
+
+    # одна "широкая" кнопка на строку
+    for punix in slice_keys:
+        rec = mp.get(str(punix)) or {}
+        pid = int(rec.get("position_id", 0) or 0)
+        name = (rec.get("position_name") or "").strip() or "Без названия"
+
+        # ext: город, человекочитаемый бюджет
+        ext = _ext_from_desc(rec.get("position_desc", "") or "")
+        city = str(ext.get("city") or "—")
+
         price = int(rec.get("position_price", 0) or 0)
-        label_price = f" • {price:,}".replace(",", " ") + " ₽" if price > 0 else ""
+        budget_text = (
+            f"{price} ₽" if price > 0 else str(ext.get("budget") or "договорная")
+        )
+
+        # компактная подпись в одну строку
+        # пример: "🏙 Москва • 💰 25 000 ₽ • Установить двери"
+        label = f"🏙 {city} • 💰 {budget_text} • {name}"
+        label = _trim_btn(label)
+
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"📦 {name}{label_price}",
-                    callback_data=f"orders:all:view:{k}:{page}",
+                    text=label, callback_data=f"orders:view:{pid}:{punix}"
                 )
             ]
         )
 
     # пагинация
     last_page = max((total - 1) // per_page, 0)
-    prev_btn = InlineKeyboardButton(
-        text="«", callback_data=f"orders:all:page:{max(page-1,0)}"
-    )
-    next_btn = InlineKeyboardButton(
-        text="»", callback_data=f"orders:all:page:{min(page+1, last_page)}"
-    )
-    rows.append(
-        [
-            prev_btn,
-            InlineKeyboardButton(text=f"{page+1}/{last_page+1}", callback_data="noop"),
-            next_btn,
-        ]
-    )
-
-    # назад к режимам
     rows.append(
         [
             InlineKeyboardButton(
-                text="← Режимы просмотра", callback_data="orders:back_modes"
-            )
+                text="«", callback_data=f"orders:all:page:{max(page-1, 0)}"
+            ),
+            InlineKeyboardButton(text=f"{page+1}/{last_page+1}", callback_data="noop"),
+            InlineKeyboardButton(
+                text="»", callback_data=f"orders:all:page:{min(page+1, last_page)}"
+            ),
         ]
     )
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -1908,19 +1998,97 @@ async def _ensure_orders_all_dataset(state: FSMContext):
     return keys, mp
 
 
+# хелперы рядом с функцией (один раз добавь где-то выше)
+import json
+
+
+def _pos_ext(desc: str) -> dict:
+    if not desc:
+        return {}
+    s = str(desc)
+    if s.startswith("[ORDER]"):
+        try:
+            _, js = s.split("\n", 1)
+            return json.loads(js)
+        except Exception:
+            return {}
+    return {}
+
+
+def _pos_cats(rec: dict) -> set[int]:
+    cats = set()
+    cid = rec.get("category_id")
+    try:
+        if cid is not None:
+            cats.add(int(cid))
+    except Exception:
+        pass
+    ext = _pos_ext(rec.get("position_desc", "") or "")
+    for x in ext.get("categories") or []:
+        try:
+            cats.add(int(x))
+        except Exception:
+            pass
+    return cats
+
+
+def _pos_has_cat(rec: dict, cat_id: int) -> bool:
+    try:
+        cat_id = int(cat_id)
+    except Exception:
+        return False
+    return cat_id in _pos_cats(rec)
+
+
+def _match_city(rec: dict, city: str) -> bool:
+    if not city:
+        return True
+    ext = _pos_ext(rec.get("position_desc", "") or "")
+    rc = str(ext.get("city", "") or "").strip().lower()
+    return rc == city.strip().lower()
+
+
+# замена функции
 async def _show_orders_all_page(
     msg_or_cb, page: int, state: FSMContext, per_page: int = 6
 ):
     keys, mp = await _ensure_orders_all_dataset(state)
-    total = len(keys)
+
+    # читаем (необязательные) фильтры, если ты их где-то устанавливаешь
+    data = await state.get_data()
+    selected_cat = int(data.get("orders_cat_filter", 0) or 0)  # 0 = без фильтра
+    city_filter = (data.get("orders_city_filter") or "").strip()  # "" = без фильтра
+
+    # фильтруем с учётом ДОП. категорий и города
+    filtered_keys = []
+    for k in keys:
+        rec = mp.get(str(k)) or {}
+        if selected_cat and not _pos_has_cat(rec, selected_cat):
+            continue
+        if city_filter and not _match_city(rec, city_filter):
+            continue
+        filtered_keys.append(k)
+
+    total = len(filtered_keys)
     last_page = max((total - 1) // per_page, 0)
     page = max(0, min(page, last_page))
-    slice_keys = keys[page * per_page : page * per_page + per_page]
+    slice_keys = filtered_keys[page * per_page : page * per_page + per_page]
 
     kb = _orders_all_kb(slice_keys, mp, page, per_page, total)
-    text = "<b>🧾 Актуальные заказы (все)</b>\nВыберите заказ:"
+
+    # подпись — покажем, что стоят фильтры (если стоят)
+    suffix = []
+    if city_filter:
+        suffix.append(f"город: {city_filter}")
+    if selected_cat:
+        suffix.append(f"категория: {selected_cat}")
+    filt_txt = f" ({', '.join(suffix)})" if suffix else ""
+
+    text = f"<b>🧾 Актуальные заказы (все){filt_txt}</b>\nВыберите заказ:"
 
     try:
+        from aiogram.types import CallbackQuery
+
         if isinstance(msg_or_cb, CallbackQuery):
             await msg_or_cb.message.edit_text(text, reply_markup=kb)
             await msg_or_cb.answer()
@@ -2751,12 +2919,12 @@ def _update_position_by_unix(punix: int, **changes):
     # 1) update(...) keyword-only
     if hasattr(Positionx, "update"):
         try:
-            return Positionx.update(position_unix=punix, **fields)
+            return Positionx.update_unix(position_unix=punix, **fields)
         except Exception as e:
             last_err = e
         # 1b) update(position_unix=..., data=fields)
         try:
-            return Positionx.update(position_unix=punix, data=fields)
+            return Positionx.update_unix(position_unix=punix, data=fields)
         except Exception as e:
             last_err = e
 
@@ -2795,6 +2963,78 @@ def _update_position_by_unix(punix: int, **changes):
     raise last_err or RuntimeError("No suitable update method on Positionx")
 
 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
+def worker_request_kb(punix: int, worker_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить исполнителя",
+                    callback_data=f"resp:approve:{punix}:{worker_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"resp:decline:{punix}:{worker_id}",
+                )
+            ],
+        ]
+    )
+
+
+from aiogram import F, Bot
+from aiogram.types import CallbackQuery
+import html
+from tgbot.database.db_position import Positionx
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import html
+
+
+def orders_request_kb(punix: int, worker_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="👤 Профиль исполнителя",
+                    callback_data=f"orders:worker_profile:{punix}:{worker_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Принять исполнителя",
+                    callback_data=f"orders:approve_worker:{punix}:{worker_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отклонить",
+                    callback_data=f"orders:decline_worker:{punix}:{worker_id}",
+                )
+            ],
+        ]
+    )
+
+
+async def send_orders_decision(
+    bot: Bot, chat_id: int, punix: int, worker_id: int, title: str
+):
+    text = (
+        "✅ <b>На ваш заказ откликнулся исполнитель</b>\n\n"
+        f"📦 Заказ: <code>{html.escape(title)}</code>\n\n"
+        "Вы можете посмотреть профиль исполнителя (фото работ), а затем принять или отклонить."
+    )
+    await bot.send_message(
+        chat_id,
+        text,
+        reply_markup=orders_request_kb(punix, worker_id),
+        disable_web_page_preview=True,
+    )
+
+
 @router.callback_query(F.data.startswith("orders:respond:"))
 async def orders_respond(call: CallbackQuery, state: FSMContext, bot: Bot):
     # orders:respond:{pid}:{punix}:{page}
@@ -2810,6 +3050,8 @@ async def orders_respond(call: CallbackQuery, state: FSMContext, bot: Bot):
     if not pos:
         await call.answer("Заказ не найден.", show_alert=True)
         return
+
+    # Если уже есть исполнитель или завершён — нельзя
     if (
         int(getattr(pos, "worker_id", 0) or 0) != 0
         or int(getattr(pos, "position_status", 0) or 0) == 2
@@ -2818,26 +3060,349 @@ async def orders_respond(call: CallbackQuery, state: FSMContext, bot: Bot):
         await _show_orders_all_page(call, page=page, state=state)
         return
 
-    # Назначаем исполнителя и переводим в «в работе»
-    _update_position_by_unix(punix, worker_id=call.from_user.id, position_status=1)
-
-    # Уведомим заказчика
     client_id = int(getattr(pos, "position_id", 0) or 0)
     title = getattr(pos, "position_name", "Заказ")
-    worker_name = call.from_user.full_name or "Исполнитель"
-    note = (
-        "✅ <b>На ваш заказ откликнулись</b>\n\n"
-        f"📦 Заказ: <code>{html.escape(title)}</code>\n"
-        f'👤 Исполнитель: <a href="tg://user?id={call.from_user.id}">{html.escape(worker_name)}</a>\n\n'
-        "Свяжитесь с ним для уточнения деталей."
-    )
+    worker_id = call.from_user.id
+
+    # 👉 не назначаем сразу; даём заказчику принять/отклонить после просмотра профиля
+    await send_orders_decision(bot, client_id, punix, worker_id, title)
+
+    await call.answer("Заявка отправлена заказчику. Ожидайте решения.")
+    await _show_orders_all_page(call, page=page, state=state)
+
+
+import json
+from aiogram.types import InputMediaPhoto
+
+
+@router.callback_query(F.data.startswith("orders:worker_profile:"))
+async def orders_worker_profile(cq: CallbackQuery, bot: Bot):
+    # orders:worker_profile:{punix}:{worker_id}
     try:
-        await bot.send_message(client_id, note, disable_web_page_preview=True)
+        _, _, punix_s, wid_s = cq.data.split(":")
+        punix = int(punix_s)
+        worker_id = int(wid_s)
+    except Exception:
+        await cq.answer("Ошибка данных", show_alert=True)
+        return
+
+    # проверим, что кнопку нажал именно заказчик этого заказа
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await cq.answer("Заказ не найден", show_alert=True)
+        return
+    owner_id = int(getattr(pos, "position_id", 0) or 0)
+    if cq.from_user.id != owner_id:
+        await cq.answer(
+            "Профиль может смотреть только заказчик по этому заказу.", show_alert=True
+        )
+        return
+
+    u = Userx.get(user_id=worker_id)
+    if not u:
+        await cq.answer("Профиль исполнителя не найден.", show_alert=True)
+        return
+
+    # базовая информация
+    rlname = getattr(u, "user_rlname", "") or ""
+    surname = getattr(u, "user_surname", "") or ""
+    name_line = (rlname + (" " + surname if surname else "")).strip() or "—"
+
+    city = getattr(u, "city", "") or "—"
+    exp = getattr(u, "experience_years", 0) or 0
+    specs = getattr(u, "specializations", "") or "—"
+    rating = getattr(u, "user_rating_avg", None)
+    rating_txt = f"{round(rating,2)} / 5" if rating else "нет оценок"
+    reg_unix = int(getattr(u, "user_unix", 0) or 0)
+    try:
+        reg_txt = convert_date(reg_unix, False, False)
+    except Exception:
+        reg_txt = "—"
+
+    txt = (
+        f"<b>👤 Профиль исполнителя</b>\n\n"
+        f"Имя: <code>{html.escape(name_line)}</code>\n"
+        f"Город: <code>{html.escape(str(city))}</code>\n"
+        f"Опыт: <code>{exp} лет</code>\n"
+        f"Специализации: <code>{html.escape(specs)}</code>\n"
+        f"Рейтинг: <code>{rating_txt}</code>\n"
+        f"Регистрация: <code>{reg_txt}</code>\n\n"
+        f"Фото работ: ниже (если добавлены)."
+    )
+
+    # фото работ (media group до 10 шт.)
+    photos_json = getattr(u, "work_photos_json", "[]") or "[]"
+    try:
+        photos = json.loads(photos_json)
+        if not isinstance(photos, list):
+            photos = []
+    except Exception:
+        photos = []
+
+    # отправим профиль текстом
+    await cq.message.answer(txt, disable_web_page_preview=True)
+
+    # и медиа-группу, если есть
+    if photos:
+        media = [
+            InputMediaPhoto(type="photo", media=file_id) for file_id in photos[:10]
+        ]
+        try:
+            await cq.message.answer_media_group(media=media)
+        except Exception:
+            # если вдруг не вышло media_group — отправим по одному
+            for fid in photos[:5]:
+                try:
+                    await cq.message.answer_photo(fid)
+                except Exception:
+                    pass
+
+    # кнопка «назад к подтверждению»
+    back_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="⬅️ Назад к подтверждению",
+                    callback_data=f"orders:back_to_approve:{punix}:{worker_id}",
+                )
+            ]
+        ]
+    )
+    await cq.message.answer("Готовы выбрать действие?", reply_markup=back_kb)
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("orders:back_to_approve:"))
+async def orders_back_to_approve(cq: CallbackQuery, bot: Bot):
+    try:
+        _, _, punix_s, wid_s = cq.data.split(":")
+        punix = int(punix_s)
+        worker_id = int(wid_s)
+    except Exception:
+        await cq.answer()
+        return
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await cq.answer("Заказ не найден", show_alert=True)
+        return
+
+    owner_id = int(getattr(pos, "position_id", 0) or 0)
+    if cq.from_user.id != owner_id:
+        await cq.answer("Недоступно.", show_alert=True)
+        return
+
+    title = getattr(pos, "position_name", "Заказ")
+    # просто отправим ещё раз экран выбора (можно было бы отредактировать, но сообщение могло быть не тем)
+    await send_orders_decision(bot, owner_id, punix, worker_id, title)
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("orders:approve_worker:"))
+async def orders_approve_worker(cq: CallbackQuery, bot: Bot):
+    # orders:approve_worker:{punix}:{worker_id}
+    try:
+        _, _, punix_s, wid_s = cq.data.split(":")
+        punix = int(punix_s)
+        worker_id = int(wid_s)
+    except Exception:
+        await cq.answer("Ошибка данных", show_alert=True)
+        return
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await cq.answer("Заказ не найден", show_alert=True)
+        return
+
+    owner_id = int(getattr(pos, "position_id", 0) or 0)
+    if cq.from_user.id != owner_id:
+        await cq.answer("Подтвердить может только заказчик.", show_alert=True)
+        return
+
+    # Назначаем исполнителя и переводим в работу
+    try:
+        Positionx.update_unix(punix, worker_id=worker_id, position_status=1)
+    except Exception:
+        try:
+            Positionx.update_gpt(
+                "position_unix", punix, worker_id=worker_id, position_status=1
+            )
+        except Exception:
+            await cq.answer("Не удалось назначить исполнителя.", show_alert=True)
+            return
+
+    try:
+        await cq.message.edit_text(
+            cq.message.html_text + "\n\n✅ Исполнитель назначен. Заказ в работе.",
+            reply_markup=None,
+        )
     except Exception:
         pass
 
-    await call.answer("Вы взяли заказ ✔️")
-    await _show_orders_all_page(call, page=page, state=state)
+    # уведомим исполнителя
+    title = getattr(pos, "position_name", "Заказ")
+    try:
+        await bot.send_message(
+            worker_id,
+            f"✅ Вас назначили исполнителем по заказу «{html.escape(title)}». Удачной работы!",
+        )
+    except Exception:
+        pass
+
+    await cq.answer("Назначено ✔️")
+
+
+@router.callback_query(F.data.startswith("orders:decline_worker:"))
+async def orders_decline_worker(cq: CallbackQuery, bot: Bot):
+    # orders:decline_worker:{punix}:{worker_id}
+    try:
+        _, _, punix_s, wid_s = cq.data.split(":")
+        punix = int(punix_s)
+        worker_id = int(wid_s)
+    except Exception:
+        await cq.answer("Ошибка данных", show_alert=True)
+        return
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await cq.answer("Заказ не найден", show_alert=True)
+        return
+
+    owner_id = int(getattr(pos, "position_id", 0) or 0)
+    if cq.from_user.id != owner_id:
+        await cq.answer("Отклонить может только заказчик.", show_alert=True)
+        return
+
+    # Ничего в заказе не меняем (оставляем свободным), просто уведомим исполнителя
+    try:
+        await cq.message.edit_text(
+            cq.message.html_text + "\n\n❌ Отклонено.", reply_markup=None
+        )
+    except Exception:
+        pass
+
+    try:
+        await bot.send_message(worker_id, "❌ Заказчик отклонил ваш отклик.")
+    except Exception:
+        pass
+
+    await cq.answer("Отклонено")
+
+
+@router.callback_query(F.data.startswith("resp:approve:"))
+async def resp_approve(cq: CallbackQuery, bot: Bot):
+    # data: resp:approve:{punix}:{worker_id}
+    try:
+        _, _, punix_s, wid_s = cq.data.split(":")
+        punix = int(punix_s)
+        wid = int(wid_s)
+    except Exception:
+        await cq.answer("Ошибка данных", show_alert=True)
+        return
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await cq.answer("Заказ не найден", show_alert=True)
+        return
+
+    owner_id = int(getattr(pos, "position_id", 0) or 0)
+    if cq.from_user.id != owner_id:
+        await cq.answer("Эта кнопка доступна только владельцу заказа.", show_alert=True)
+        return
+
+    current_worker = int(getattr(pos, "worker_id", 0) or 0)
+    if current_worker and current_worker != wid:
+        # уже назначен другой — просто уберём кнопки
+        try:
+            await cq.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await cq.answer("Заказ уже назначен другому исполнителю.", show_alert=True)
+        return
+
+    # Назначаем исполнителя и ставим статус «в работе» (1)
+    try:
+        Positionx.update_unix(punix, worker_id=wid, position_status=1)
+    except Exception:
+        try:
+            Positionx.update_gpt(
+                "position_unix", punix, worker_id=wid, position_status=1
+            )
+        except Exception:
+            await cq.answer("Не удалось назначить исполнителя.", show_alert=True)
+            return
+
+    # Обновим сообщение и уведомим исполнителя
+    try:
+        await cq.message.edit_text(
+            cq.message.html_text + "\n\n✅ Исполнитель подтверждён.", reply_markup=None
+        )
+    except Exception:
+        pass
+    try:
+        title = getattr(pos, "position_name", "Заказ")
+        await bot.send_message(
+            wid,
+            "✅ Вас назначили исполнителем по заказу "
+            f"«{html.escape(title)}». "
+            f'Свяжитесь с заказчиком: <a href="tg://user?id={owner_id}">профиль</a>',
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
+
+    await cq.answer("Подтверждено ✔️")
+
+
+@router.callback_query(F.data.startswith("resp:decline:"))
+async def resp_decline(cq: CallbackQuery, bot: Bot):
+    # data: resp:decline:{punix}:{worker_id}
+    try:
+        _, _, punix_s, wid_s = cq.data.split(":")
+        punix = int(punix_s)
+        wid = int(wid_s)
+    except Exception:
+        await cq.answer("Ошибка данных", show_alert=True)
+        return
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await cq.answer("Заказ не найден", show_alert=True)
+        return
+
+    owner_id = int(getattr(pos, "position_id", 0) or 0)
+    if cq.from_user.id != owner_id:
+        await cq.answer("Эта кнопка доступна только владельцу заказа.", show_alert=True)
+        return
+
+    # Если именно этот исполнитель уже был назначен — снимаем
+    try:
+        cur_w = int(getattr(pos, "worker_id", 0) or 0)
+    except Exception:
+        cur_w = 0
+    if cur_w == wid:
+        try:
+            Positionx.update_unix(punix, worker_id=0, position_status=0)
+        except Exception:
+            try:
+                Positionx.update_gpt(
+                    "position_unix", punix, worker_id=0, position_status=0
+                )
+            except Exception:
+                pass
+
+    try:
+        await cq.message.edit_text(
+            cq.message.html_text + "\n\n❌ Заявка отклонена.", reply_markup=None
+        )
+    except Exception:
+        pass
+    try:
+        await bot.send_message(wid, "❌ Заказчик отклонил вашу заявку.")
+    except Exception:
+        pass
+
+    await cq.answer("Отклонено")
 
 
 @router.callback_query(StateFilter("orders_viewing"), F.data == "orders:back_to_list")
@@ -4093,7 +4658,7 @@ async def prod_position_edit_name_get(
     await state.clear()
     get_position = Positionx.get(position_id=position_id)
     position_unix = get_position.position_unix
-    Positionx.update(position_id, position_name=clear_html(message.text))
+    Positionx.update_unix(position_id, position_name=clear_html(message.text))
     await position_open_admin(bot, message.from_user.id, position_id, position_unix)
 
 
@@ -4147,7 +4712,7 @@ async def prod_position_edit_price_get(
     await state.clear()
     get_position = Positionx.get(position_id=position_id)
     position_unix = get_position.position_unix
-    Positionx.update(position_id, position_price=to_number(message.text))
+    Positionx.update_unix(position_id, position_price=to_number(message.text))
     await position_open_admin(bot, message.from_user.id, position_id, position_unix)
 
 
@@ -4211,7 +4776,7 @@ async def prod_position_edit_desc_get(
     await state.clear()
     get_position = Positionx.get(position_id=position_id)
     position_unix = get_position.position_unix
-    Positionx.update(position_id, position_desc=position_desc)
+    Positionx.update_unix(position_id, position_desc=position_desc)
     await position_open_admin(bot, message.from_user.id, position_id, position_unix)
 
 

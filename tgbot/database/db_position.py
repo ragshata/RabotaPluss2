@@ -122,6 +122,7 @@ class Positionx:
                     category_id,
                 ],
             )
+        return position_unix
 
     # Получение записи
     @staticmethod

@@ -245,93 +245,168 @@ async def toggle_spec(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-@router.callback_query(RegisterStates.specs, F.data == "spec_done")
-async def specs_done(call: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected = data.get("specs_selected", [])
-    if not selected:
-        await call.answer("Выберите хотя бы одну специализацию.", show_alert=True)
-        return
-    await state.update_data(specs_selected=selected)
-    await call.message.edit_text(
-        "📸 Загрузите 1–5 фото ваших работ. Или нажмите «Пропустить»."
+# --- импорты рядом с остальными ---
+from aiogram import F, Router, Bot
+from aiogram.types import (
+    CallbackQuery,
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputMediaPhoto,
+)
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+
+from tgbot.database.db_position import Positionx
+
+router = Router(name=__name__)
+
+
+# ========= клавиатура подтверждения/добавления/отмены =========
+def handoff_kb(punix: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Подтвердить", callback_data=f"handoff:confirm:{punix}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="➕ Добавить ещё", callback_data=f"handoff:add:{punix}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена", callback_data=f"handoff:cancel:{punix}"
+                )
+            ],
+        ]
     )
-    await call.message.edit_reply_markup(reply_markup=skip_kb())
-    await state.set_state(RegisterStates.photos)
+
+
+# ========= состояния, как в регистрации =========
+class HandoffStates(StatesGroup):
+    photos = State()  # ждём фото от исполнителя
+
+
+# ========= старт «Сдать работу» =========
+# вызывaется по твоей кнопке: myresp:handoff:{punix}
+@router.callback_query(F.data.startswith("myresp:handoff:"))
+async def handoff_start(call: CallbackQuery, state: FSMContext):
+    punix = int(call.data.split(":")[2])
+    await state.update_data(handoff_punix=punix, handoff_photos=[])
+    await call.message.edit_text(
+        "📸 Загрузите 1–5 фото выполненной работы.\n"
+        "Можно отправлять несколько сообщений с фото.\n"
+        "Когда будете готовы — нажмите «✅ Подтвердить».",
+        reply_markup=handoff_kb(punix),
+    )
+    await state.set_state(HandoffStates.photos)
     await call.answer()
 
 
-# Приём фото (1..5)
-@router.message(RegisterStates.photos, F.photo)
-async def receive_photo(message: Message, state: FSMContext):
+# ========= приём фото (1..5), как в твоей регистрации =========
+@router.message(HandoffStates.photos, F.photo)
+async def handoff_receive_photo(message: Message, state: FSMContext):
     data = await state.get_data()
-    files = data.get("work_photos", [])
-    if not isinstance(files, list):
-        files = []
+    punix: int = int(data.get("handoff_punix", 0))
+    files: list[str] = list(data.get("handoff_photos", []))
+
     if len(files) >= 5:
         await message.answer(
-            "Максимум 5 фото. Нажмите «Пропустить» или завершите отправку."
+            "Максимум 5 фото. Нажмите «✅ Подтвердить» или «❌ Отмена»."
         )
         return
-    file_id = message.photo[-1].file_id
+
+    file_id = message.photo[-1].file_id  # берём самое большое
     files.append(file_id)
-    await state.update_data(work_photos=files)
+    await state.update_data(handoff_photos=files)
+
     await message.answer(
-        f"Фото добавлено ({len(files)}/5). Можете отправить ещё или нажмите «Пропустить».",
-        reply_markup=types.ReplyKeyboardRemove(),
+        f"Фото добавлено ({len(files)}/5). Можете отправить ещё или нажмите «✅ Подтвердить».",
+        reply_markup=handoff_kb(punix),
     )
 
 
-@router.callback_query(RegisterStates.photos, F.data == "photos_skip")
-async def photos_skip(call: CallbackQuery, state: FSMContext):
-    # Сохраняем пользователя в БД со всеми полями
+# ========= подтвердить отправку =========
+@router.callback_query(HandoffStates.photos, F.data.startswith("handoff:confirm:"))
+async def handoff_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
+    punix = int(call.data.split(":")[-1])
     data = await state.get_data()
-    user_rlname = data["user_rlname"]
-    user_surname = data["user_surname"]
-    user_number = data["user_number"]
-    experience_years = int(data["experience_years"])
-    city = data["city"]
-    # Преобразуем slug-и в читаемые названия
-    from tgbot.keyboards.inline_register import SPECS
+    photos: list[str] = list(data.get("handoff_photos", []))[:5]
 
-    slug_to_title = {s: t for s, t in SPECS}
-    selected_slugs = data.get("specs_selected", [])
-    spec_titles = [slug_to_title.get(s, s) for s in selected_slugs]
-    specializations_str = ",".join(spec_titles)
-    work_photos = data.get("work_photos", [])
-    work_photos_json = json.dumps(work_photos, ensure_ascii=False)
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await call.answer("Заказ не найден.", show_alert=True)
+        return
 
-    Userx.update_with_profile(
-        user_id=call.from_user.id,
-        user_login=call.from_user.username or "unknown",
-        user_name=call.from_user.first_name or "unknown",
-        user_rlname=user_rlname,
-        user_surname=user_surname,
-        user_number=user_number,
-        experience_years=experience_years,
-        city=city,
-        specializations=specializations_str,
-        work_photos_json=work_photos_json,
-    )
+    client_id = int(getattr(pos, "position_id", 0) or 0)
+    title = getattr(pos, "position_name", "Заказ")
+
+    # если фото нет — попросим добавить хотя бы одно
+    if not photos:
+        await call.answer(
+            "Добавьте хотя бы одно фото или нажмите «❌ Отмена».", show_alert=True
+        )
+        return
+
+    # 1) отправим медиагруппу заказчику
+    media = [InputMediaPhoto(type="photo", media=fid) for fid in photos]
+    try:
+        await bot.send_media_group(chat_id=client_id, media=media)
+    except Exception:
+        # fallback: по одному
+        for fid in photos:
+            try:
+                await bot.send_photo(chat_id=client_id, photo=fid)
+            except Exception:
+                pass
+
+    # 2) уведомление заказчику
+    try:
+        await bot.send_message(
+            chat_id=client_id,
+            text=(
+                "🚚 <b>Исполнитель сдал работу</b>\n\n"
+                f"📦 Заказ: <code>{title}</code>\n\n"
+                "Проверьте материалы и подтвердите выполнение заказа."
+            ),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        pass
+
+    # (опционально) поменять статус на «на проверке» = 2
+    try:
+        Positionx.update_unix(punix, position_status=2)
+    except Exception:
+        pass
+
+    # 3) ответ исполнителю
+    try:
+        await call.message.edit_text("✅ Отправлено заказчику. Ожидайте подтверждения.")
+    except Exception:
+        await call.message.answer("✅ Отправлено заказчику. Ожидайте подтверждения.")
 
     await state.clear()
+    await call.answer()
 
-    await call.message.edit_text(
-        f"✅ Регистрация завершена!\n"
-        f"Имя: {user_rlname}\n"
-        f"Фамилия: {user_surname}\n"
-        f"Телефон: {user_number}\n"
-        f"Опыт: {experience_years} лет\n"
-        f"Город: {city}\n"
-        f"Специализации: {specializations_str or '—'}\n"
-        f"Фото работ: {'добавлены' if work_photos else 'не добавлены'}"
-    )
-    await call.message.answer(
-        f"Добро пожаловать, {user_rlname}!\nВаш профиль исполнителя создан."
-    )
-    await call.message.answer(
-        "Что дальше?", reply_markup=menu_second_start(call.from_user.id)
-    )
+
+# ========= добавить ещё (просто подсказка, остаёмся в state) =========
+@router.callback_query(HandoffStates.photos, F.data.startswith("handoff:add:"))
+async def handoff_add_more(call: CallbackQuery, state: FSMContext):
+    await call.answer("Пришлите ещё фото одним или несколькими сообщениями.")
+
+
+# ========= отмена =========
+@router.callback_query(HandoffStates.photos, F.data.startswith("handoff:cancel:"))
+async def handoff_cancel(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await call.message.edit_text("❌ Отменено.")
+    except Exception:
+        await call.message.answer("❌ Отменено.")
     await call.answer()
 
 
