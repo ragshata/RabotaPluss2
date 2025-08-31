@@ -75,11 +75,11 @@ def update_position_by_unix(punix: int, **changes):
     last_err = None
     if hasattr(Positionx, "update"):
         try:
-            return Positionx.update(position_unix=punix, **fields)
+            return Positionx.update_unix(position_unix=punix, **fields)
         except Exception as e:
             last_err = e
         try:
-            return Positionx.update(position_unix=punix, data=fields)
+            return Positionx.update_unix(position_unix=punix, data=fields)
         except Exception as e:
             last_err = e
     if hasattr(Positionx, "set"):
