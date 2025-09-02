@@ -20,8 +20,7 @@ def menu_frep(user_id) -> ReplyKeyboardMarkup:
             rkb("⚙️ Настройки"),
             rkb("🔆 Общие функции"),
         ).row(
-            rkb("🗂 Список пользователей"),
-            rkb("🎟 Подписки"),  # <-- ДОБАВЛЕНО
+            rkb("🗂 Список пользователей"),                  #rkb("🎟 Подписки"),  # <-- ДОБАВЛЕНО
         )
 
     if not (user_id in get_admins()):

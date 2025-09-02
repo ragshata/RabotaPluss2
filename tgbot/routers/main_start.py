@@ -6,6 +6,7 @@ from aiogram.filters.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from tgbot.database.db_users import Clientx, Userx
+from aiogram.filters import Command, CommandStart
 from tgbot.database.db_settings import Settingsx
 from tgbot.database.db_users import UserModel
 from tgbot.keyboards.inline_register import cities_kb, skip_kb, specs_kb
@@ -117,7 +118,7 @@ async def filter_refill_callback(
 ################################################################################
 #################################### ПРОЧЕЕ ####################################
 # Открытие главного меню
-@router.message(F.text.in_(("🔙 Главное меню", "/start")))
+@router.message(Command(commands=["start"]))
 async def main_start(message: Message, bot: Bot, state: FSM, arSession: ARS):
     await state.clear()
 

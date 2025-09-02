@@ -3,6 +3,7 @@ from aiogram import Router, Bot, F
 from aiogram.filters import StateFilter
 from aiogram.types import CallbackQuery, Message
 
+from tgbot.keyboards.reply_main import menu_frep
 from tgbot.utils.const_functions import del_message, ded
 from tgbot.utils.misc.bot_models import FSM, ARS
 
@@ -36,11 +37,14 @@ async def main_missed_callback(
 # Обработка всех неизвестных команд
 @router.message()
 async def main_missed_message(message: Message, bot: Bot, state: FSM, arSession: ARS):
+    await state.clear()
+
     await message.answer(
         ded(
-            f"""
-            ♦️ Неизвестная команда.
-            ♦️ Введите /start
+            """
+            👷‍♂️ Строительная Биржа RabotaPlus — ваш помощник в поиске специалистов и заказов!  
+            Что вы хотите сделать? 
         """
         ),
+        reply_markup=menu_frep(message.from_user.id),
     )
